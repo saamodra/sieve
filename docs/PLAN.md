@@ -173,11 +173,11 @@ Outcome of this phase: a real iPhone can be set up by scanning a QR code, and an
 
 **Android mode 2 (Google APIs emulator or rooted device)**
 
-- [ ] Detect whether `adb root` or `su` is available; if not, refuse with a clear message.
-- [ ] Android 13 and below: mount a tmpfs over `/system/etc/security/cacerts`, copy the existing certs plus `sieve`'s `<hash>.0`, set permissions and the SELinux label.
-- [ ] Android 14+: do the same in `/apex/com.android.conscrypt/cacerts`, then bind-mount into the namespace of every zygote process and already-running app with `nsenter`.
-- [ ] Everything goes through a single shell script that is pushed and run via `adb shell`. Study HTTP Toolkit's approach as a reference.
-- [ ] The effect disappears on reboot (by design, safe); provide `sieve android inject-ca` to redo it.
+- [x] Detect whether `adb root` or `su` is available; if not, refuse with a clear message.
+- [x] Android 13 and below: mount a tmpfs over `/system/etc/security/cacerts`, copy the existing certs plus `sieve`'s `<hash>.0`, set permissions and the SELinux label.
+- [x] Android 14+: do the same in `/apex/com.android.conscrypt/cacerts`, then bind-mount into the namespace of every zygote process and already-running app with `nsenter`.
+- [x] Everything goes through a single shell script that is pushed and run via `adb shell`. Study HTTP Toolkit's approach as a reference.
+- [x] The effect disappears on reboot (by design, safe); provide `sieve android inject-ca` to redo it.
 
 **Phase 4 tests**
 
