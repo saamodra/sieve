@@ -1918,14 +1918,24 @@ name = "sieve"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rcgen",
+ "reqwest",
+ "rustls",
  "sieve-core",
  "sieve-device",
  "sieve-ui",
+ "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "x509-parser",
 ]
 
 [[package]]
