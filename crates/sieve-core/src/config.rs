@@ -90,6 +90,7 @@ impl Config {
 pub struct ProxyConfig {
     pub listen: SocketAddr,
     /// Hosts that are tunneled without interception (pinned or uninteresting).
+    /// Exact names, or `*.example.com` for every subdomain of example.com.
     pub passthrough_hosts: Vec<String>,
     pub max_body_bytes: usize,
 }

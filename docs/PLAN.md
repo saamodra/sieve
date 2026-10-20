@@ -85,23 +85,23 @@ Outcome of this phase: `sieve start` runs a proxy on port 8080 that can intercep
 
 **Phase 1a: Certificate Authority**
 
-- [ ] Generate the root CA once with `rcgen`: ECDSA P-256 or RSA 2048 key, valid for about 1 year, stored as `ca.pem` and `ca.key` with permission 600.
-- [ ] `sieve ca export --format pem|der|cer` for device needs (Android needs the hash file name, iOS needs `.cer` or a profile).
-- [ ] Compute `subject_hash_old` for the Android file name. Calling `openssl x509 -subject_hash_old` is fine at first; it can be replaced with a Rust implementation later.
-- [ ] Per-host leaf certs are generated on the fly and cached in memory (LRU); the SAN must be set to the hostname/IP.
+- [x] Generate the root CA once with `rcgen`: ECDSA P-256 or RSA 2048 key, valid for about 1 year, stored as `ca.pem` and `ca.key` with permission 600.
+- [x] `sieve ca export --format pem|der|cer` for device needs (Android needs the hash file name, iOS needs `.cer` or a profile).
+- [x] Compute `subject_hash_old` for the Android file name. Calling `openssl x509 -subject_hash_old` is fine at first; it can be replaced with a Rust implementation later.
+- [x] Per-host leaf certs are generated on the fly and cached in memory (LRU); the SAN must be set to the hostname/IP.
 
 **Phase 1b: core proxy**
 
-- [ ] Proxy built on `hudsucker` (hyper + rustls) using the CA from 1a.
-- [ ] Support HTTP/1.1, HTTP/2 via ALPN, and WebSocket upgrades.
-- [ ] Every request becomes a `Flow` (id, time, method, URL, headers, request/response body, status, duration, size) sent to a `tokio::sync::broadcast` channel.
-- [ ] Large bodies are stored truncated (e.g. at most 5 MB in memory); the rest is marked truncated.
-- [ ] Decompress gzip, br, and zstd for display, but forward the original traffic as is.
-- [ ] Per-host passthrough option (no interception) for pinned or unimportant domains.
+- [x] Proxy built on `hudsucker` (hyper + rustls) using the CA from 1a. Done on hyper + tokio-rustls directly instead, because hudsucker cannot report client TLS handshake failures (see `proxy/mod.rs`).
+- [x] Support HTTP/1.1, HTTP/2 via ALPN, and WebSocket upgrades.
+- [x] Every request becomes a `Flow` (id, time, method, URL, headers, request/response body, status, duration, size) sent to a `tokio::sync::broadcast` channel.
+- [x] Large bodies are stored truncated (e.g. at most 5 MB in memory); the rest is marked truncated.
+- [x] Decompress gzip, br, and zstd for display, but forward the original traffic as is.
+- [x] Per-host passthrough option (no interception) for pinned or unimportant domains.
 
 **Phase 1 tests**
 
-- [ ] `curl -x http://127.0.0.1:8080 --cacert ca.pem https://example.com` succeeds and is recorded.
+- [x] `curl -x http://127.0.0.1:8080 --cacert ca.pem https://example.com` succeeds and is recorded.
 - [ ] A browser on the Mac with a manual proxy can open HTTP/2 sites without certificate errors.
 
 ## Phase 2: Android mode 1 + iOS Simulator
