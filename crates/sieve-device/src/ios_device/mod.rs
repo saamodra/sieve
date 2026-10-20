@@ -34,7 +34,7 @@ pub struct SetupContext {
 }
 
 #[derive(Clone)]
-struct State_ {
+struct SetupState {
     ca_der: Arc<Vec<u8>>,
     proxy_addr: SocketAddr,
     verified: Arc<AtomicBool>,
@@ -52,7 +52,7 @@ pub fn routes(ctx: SetupContext) -> Router {
 fn build(ca_der: Vec<u8>, proxy_addr: SocketAddr, flows: &FlowSender) -> Router {
     let verified = Arc::new(AtomicBool::new(false));
     tokio::spawn(watch_flows(flows.clone(), verified.clone()));
-    let state = State_ {
+    let state = SetupState {
         ca_der: Arc::new(ca_der),
         proxy_addr,
         verified,
@@ -93,7 +93,7 @@ async fn setup_page(headers: HeaderMap) -> Html<String> {
     Html(page::render(&request_host(&headers)))
 }
 
-async fn profile_download(State(s): State<State_>) -> Response {
+async fn profile_download(State(s): State<SetupState>) -> Response {
     let mut res = mobileconfig(&s.ca_der).into_response();
     res.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -106,7 +106,7 @@ async fn profile_download(State(s): State<State_>) -> Response {
     res
 }
 
-async fn pac_file(State(s): State<State_>) -> Response {
+async fn pac_file(State(s): State<SetupState>) -> Response {
     let body = match advertised_addr(s.proxy_addr) {
         Ok(addr) => pac(addr),
         Err(e) => {
@@ -120,7 +120,7 @@ async fn pac_file(State(s): State<State_>) -> Response {
         .into_response()
 }
 
-async fn status(State(s): State<State_>) -> impl IntoResponse {
+async fn status(State(s): State<SetupState>) -> impl IntoResponse {
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({ "ok": s.verified.load(Ordering::Relaxed) })),
