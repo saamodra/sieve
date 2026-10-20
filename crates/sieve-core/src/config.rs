@@ -21,7 +21,11 @@ pub struct Paths {
 }
 
 impl Paths {
+    /// `SIEVE_CONFIG_DIR` overrides the per-OS default.
     pub fn discover() -> Result<Self> {
+        if let Some(dir) = std::env::var_os("SIEVE_CONFIG_DIR") {
+            return Ok(Self::at(dir));
+        }
         let dirs =
             ProjectDirs::from("", "", "sieve").context("could not determine the home directory")?;
         Ok(Self::at(dirs.config_dir()))
