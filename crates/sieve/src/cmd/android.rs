@@ -1,8 +1,9 @@
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
-use sieve_device::android::{Adb, system_ca};
+use sieve_device::android::{Adb, mode1, system_ca};
+use tokio_util::sync::CancellationToken;
 
-use crate::app::Context;
+use crate::app::{Context, run_session};
 
 #[derive(Args)]
 pub struct AndroidArgs {
@@ -21,6 +22,8 @@ enum AndroidCommand {
     Teardown,
     /// Print the network_security_config.xml snippet for debug builds.
     Nsc,
+    /// Check that the device is routed to a running sieve proxy.
+    Health,
     /// Inject the CA into the system store (mode 2, emulator or root).
     InjectCa,
 }
@@ -28,9 +31,42 @@ enum AndroidCommand {
 pub async fn run(ctx: Context, args: AndroidArgs) -> Result<()> {
     let adb = Adb::default();
     let serial = args.serial.as_deref();
+    let port = ctx.config.proxy.listen.port();
     match args.command {
-        AndroidCommand::Setup | AndroidCommand::Teardown | AndroidCommand::Nsc => {
-            bail!("not implemented yet (phase 2)")
+        AndroidCommand::Setup => {
+            let device = mode1::select_device(&adb, serial).await?;
+            let ca = ctx.load_ca()?;
+            mode1::setup(&adb, &device, port, ca.cert_pem()).await?;
+            println!("Device {device} now proxies through 127.0.0.1:{port}.\n");
+            println!("{}\n", mode1::install_steps());
+            mode1::with_teardown(
+                &adb,
+                &device,
+                port,
+                run_session(&ctx, ca, CancellationToken::new()),
+            )
+            .await
+        }
+        AndroidCommand::Teardown => {
+            let device = mode1::select_device(&adb, serial).await?;
+            mode1::teardown(&adb, &device, port).await?;
+            println!("Device {device}: http_proxy reset and adb reverse removed.");
+            Ok(())
+        }
+        AndroidCommand::Nsc => {
+            print!("{}", mode1::nsc_snippet());
+            Ok(())
+        }
+        AndroidCommand::Health => {
+            let device = mode1::select_device(&adb, serial).await?;
+            let checks = mode1::health(&adb, &device, port).await;
+            for check in &checks {
+                println!("{check}");
+            }
+            if !mode1::all_passed(&checks) {
+                bail!("health check failed");
+            }
+            Ok(())
         }
         AndroidCommand::InjectCa => {
             let ca = ctx.load_ca()?;

@@ -110,13 +110,13 @@ Outcome of this phase: `sieve android setup` and `sieve ios-sim setup` get debug
 
 **Android mode 1 (no root, your own app)**
 
-- [ ] Detect devices with `adb devices -l`; if there is more than one, ask the user to pick or accept `--serial`.
-- [ ] `adb reverse tcp:8080 tcp:8080` so the device reaches the proxy on `127.0.0.1` over USB.
-- [ ] `adb shell settings put global http_proxy 127.0.0.1:8080` during setup.
-- [ ] `sieve android teardown` restores `:0` and removes the reverse. Teardown also runs automatically on Ctrl+C.
-- [ ] Push the CA to `/sdcard/Download/sieve-ca.crt`, then print short instructions for installing it via Settings > Security > Install certificate.
-- [ ] `sieve android nsc` prints a `network_security_config.xml` snippet (a `debug-overrides` block that trusts user certs) and the manifest line to add.
-- [ ] Health check: proxy is set, reverse is active, and a test request from `adb shell` (if the device has `curl`) reaches the proxy.
+- [x] Detect devices with `adb devices -l`; if there is more than one, ask the user to pick or accept `--serial`.
+- [x] `adb reverse tcp:8080 tcp:8080` so the device reaches the proxy on `127.0.0.1` over USB.
+- [x] `adb shell settings put global http_proxy 127.0.0.1:8080` during setup.
+- [x] `sieve android teardown` restores `:0` and removes the reverse. Teardown also runs automatically on Ctrl+C.
+- [x] Push the CA to `/sdcard/Download/sieve-ca.crt`, then print short instructions for installing it via Settings > Security > Install certificate.
+- [x] `sieve android nsc` prints a `network_security_config.xml` snippet (a `debug-overrides` block that trusts user certs) and the manifest line to add.
+- [x] Health check: proxy is set, reverse is active, and a test request from `adb shell` (if the device has `curl`) reaches the proxy.
 
 Running `adb` through `tokio::process::Command` is enough. Wrap it in an `AndroidBridge` trait so it is easy to mock in tests.
 
