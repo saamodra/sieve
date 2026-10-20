@@ -1,0 +1,25 @@
+[package]
+name = "sieve"
+description = "HTTP/HTTPS debug proxy for Android and iOS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "sieve"
+path = "src/main.rs"
+
+[dependencies]
+sieve-core.workspace = true
+sieve-device.workspace = true
+sieve-ui.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
