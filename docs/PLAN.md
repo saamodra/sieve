@@ -201,10 +201,10 @@ This phase is done as needed; each part stands alone, so the order is free.
 
 **5c. Frida for certificate pinning (your own apps or ones you may test)**
 
-- [ ] Android: `sieve android frida --package <id>` pushes `frida-server` for the right ABI, starts it, then spawns the app with an unpinning script.
-- [ ] Use a well-tested open source unpinning script; check its license before bundling.
-- [ ] Non-jailbroken iOS: document re-signing a debug app with the Frida gadget. Not automated in v1.
-- [ ] Flutter note: Flutter apps ignore the system proxy and the OS cert store, so they need Frida or a proxy set in Dart code during debugging.
+- [x] Android: `sieve android frida --package <id>` pushes `frida-server` for the right ABI, starts it, then spawns the app with an unpinning script.
+- [x] Use a well-tested open source unpinning script; check its license before bundling. (No candidate had a license that permitted vendoring — see `docs/frida.md` — so the bundled script is an original sieve implementation of the same public hook points.)
+- [x] Non-jailbroken iOS: document re-signing a debug app with the Frida gadget. Not automated in v1. (`docs/frida.md`)
+- [x] Flutter note: Flutter apps ignore the system proxy and the OS cert store, so they need Frida or a proxy set in Dart code during debugging. (`docs/frida.md`)
 
 **5d. VPN mode (largest, last)**
 

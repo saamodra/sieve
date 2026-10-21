@@ -6,7 +6,7 @@ sieve is an HTTP and HTTPS debug proxy for Android and iOS, written in Rust. It 
 
 sieve is pre-alpha and built in phases. The full plan, with a checklist for each phase, is in [docs/PLAN.md](docs/PLAN.md).
 
-Phases 0 to 4 are implemented: the certificate authority, the proxy (HTTP/1.1, HTTP/2, WebSocket), the web UI, and device setup for Android (modes 1 and 2), the iOS Simulator, and physical iPhones. Device setup has not yet been verified on real devices; [docs/TESTING.md](docs/TESTING.md) is the manual test guide. Phase 5 (rules, breakpoints, Frida, VPN mode) is not started.
+Phases 0 to 4 are implemented: the certificate authority, the proxy (HTTP/1.1, HTTP/2, WebSocket), the web UI, and device setup for Android (modes 1 and 2), the iOS Simulator, and physical iPhones. Device setup has not yet been verified on real devices; [docs/TESTING.md](docs/TESTING.md) is the manual test guide. Phase 5 is done as needed; 5c (Frida certificate-pinning bypass on Android, plus docs for non-jailbroken iOS and Flutter) is done — see [docs/frida.md](docs/frida.md). Rules, breakpoints, and VPN mode are not started.
 
 ## Build from source
 
