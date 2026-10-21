@@ -17,6 +17,7 @@
   const editable = $derived(req.body !== null);
 
   let busy = $state(false);
+  let error = $state('');
   let left = $state(0);
 
   $effect(() => {
@@ -28,17 +29,29 @@
 
   async function resume() {
     busy = true;
-    await continueHeld(req.id, {
-      method,
-      url,
-      headers: textToHeaders(headers),
-      ...(editable && body !== (req.body ?? '') ? { body } : {}),
-    });
+    error = '';
+    try {
+      await continueHeld(req.id, {
+        method,
+        url,
+        headers: textToHeaders(headers),
+        ...(editable && body !== (req.body ?? '') ? { body } : {}),
+      });
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+      busy = false;
+    }
   }
 
   async function abort() {
     busy = true;
-    await abortHeld(req.id);
+    error = '';
+    try {
+      await abortHeld(req.id);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+      busy = false;
+    }
   }
 </script>
 
@@ -60,6 +73,7 @@
     <button type="button" onclick={abort} disabled={busy}>Abort</button>
     {#if req.timeout_secs}<span class="dim">continues unchanged in {left}s</span>{/if}
   </div>
+  {#if error}<p class="error" role="alert">{error}</p>{/if}
 </form>
 
 <style>
@@ -99,5 +113,9 @@
   }
   .dim {
     color: var(--fg-dim);
+  }
+  .error {
+    margin: 0;
+    color: var(--bad);
   }
 </style>

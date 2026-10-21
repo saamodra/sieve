@@ -37,6 +37,9 @@ export class Capture {
   #clientSet = new Set<string>();
   #incoming: WsEvent[] = [];
   #held: WsEvent[] = [];
+  #queued: WsEvent[] = [];
+  #reloading = false;
+  #reloadAgain = false;
   #scheduled = false;
   #ws: WebSocket | null = null;
   #retry: ReturnType<typeof setTimeout> | undefined;
@@ -67,14 +70,40 @@ export class Capture {
     };
   }
 
+  /**
+   * Replaces local state with a server snapshot. Live events that arrive while
+   * the snapshot is being fetched are queued and replayed on top of it, so a
+   * newer live update is never overwritten by an older snapshot row. Only one
+   * reload runs at a time; requests made meanwhile coalesce into one follow-up.
+   */
   async #reload() {
+    if (this.#reloading) {
+      this.#reloadAgain = true;
+      return;
+    }
+    this.#reloading = true;
     try {
-      const all = await fetchAllFlows();
-      this.#push({ type: 'clear' });
-      for (const flow of all) this.#push({ type: 'flow', flow });
-      this.held = await fetchHeld().catch(() => []);
-    } catch (e) {
-      console.error('loading flows failed', e);
+      do {
+        this.#reloadAgain = false;
+        let snapshot: FlowSummary[] | null = null;
+        let held: HeldRequest[] | null = null;
+        try {
+          snapshot = await fetchAllFlows();
+          held = await fetchHeld().catch(() => null);
+        } catch (e) {
+          console.error('loading flows failed', e);
+        }
+        const queued = this.#queued;
+        this.#queued = [];
+        if (snapshot) {
+          this.#dispatch({ type: 'clear' });
+          for (const flow of snapshot) this.#dispatch({ type: 'flow', flow });
+        }
+        if (held) this.held = held;
+        for (const ev of queued) this.#dispatch(ev);
+      } while (this.#reloadAgain);
+    } finally {
+      this.#reloading = false;
     }
   }
 
@@ -83,6 +112,14 @@ export class Capture {
       void this.#reload();
       return;
     }
+    if (this.#reloading) {
+      this.#queued.push(ev);
+      return;
+    }
+    this.#dispatch(ev);
+  }
+
+  #dispatch(ev: WsEvent) {
     if (ev.type === 'breakpoint') {
       this.held = [...this.held.filter((h) => h.id !== ev.request.id), ev.request];
       return;

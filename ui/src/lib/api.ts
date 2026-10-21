@@ -57,14 +57,23 @@ export async function fetchHeld(): Promise<HeldRequest[]> {
   return (await ok(await fetch('/api/breakpoints'))).json().then((d) => d.held);
 }
 
+/** Throws the server's message, e.g. when the request was already released. */
+async function okOrMessage(res: Response): Promise<void> {
+  if (res.ok) return;
+  const data = await res.json().catch(() => ({}));
+  throw new Error(data.error ?? `${res.status} ${res.statusText}`);
+}
+
 export async function continueHeld(id: number, edit: RequestEdit): Promise<void> {
-  await fetch(`/api/breakpoints/${id}/continue`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(edit),
-  });
+  await okOrMessage(
+    await fetch(`/api/breakpoints/${id}/continue`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(edit),
+    }),
+  );
 }
 
 export async function abortHeld(id: number): Promise<void> {
-  await fetch(`/api/breakpoints/${id}/abort`, { method: 'POST' });
+  await okOrMessage(await fetch(`/api/breakpoints/${id}/abort`, { method: 'POST' }));
 }
