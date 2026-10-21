@@ -85,7 +85,7 @@ Outcome of this phase: `sieve start` runs a proxy on port 8080 that can intercep
 
 **Phase 1a: Certificate Authority**
 
-- [x] Generate the root CA once with `rcgen`: ECDSA P-256 or RSA 2048 key, valid for about 1 year, stored as `ca.pem` and `ca.key` with permission 600.
+- [x] Generate the root CA once with `rcgen`: ECDSA P-256 or RSA 2048 key, valid for 10 years, stored as `ca.pem` and `ca.key` with permission 600.
 - [x] `sieve ca export --format pem|der|cer` for device needs (Android needs the hash file name, iOS needs `.cer` or a profile).
 - [x] Compute `subject_hash_old` for the Android file name. Calling `openssl x509 -subject_hash_old` is fine at first; it can be replaced with a Rust implementation later.
 - [x] Per-host leaf certs are generated on the fly and cached in memory (LRU); the SAN must be set to the hostname/IP.
