@@ -15,6 +15,7 @@ use tracing::warn;
 use super::{
     Conn, ProxyBody,
     capture::{CaptureBody, Exchange, Side},
+    decode::decode_all,
     strip_hop_by_hop, text_response, upstream_failed,
 };
 use crate::{
@@ -334,22 +335,25 @@ pub(super) async fn forward_with_scripts(
         }
     };
 
-    let mut freq = flow_request_from(&parts, &bytes);
-    let outcome = match scripts.on_request(&mut freq) {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            warn!("script on_request failed, forwarding the request unmodified: {e:#}");
-            RequestOutcome::Forward
+    let limit = exchange.max_body();
+    let mut freq = flow_request_from(&parts, script_body(&parts.headers, &bytes, limit).await);
+    if freq.body.decoded.is_some() {
+        let outcome = match scripts.on_request(&mut freq) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                warn!("script on_request failed, forwarding the request unmodified: {e:#}");
+                RequestOutcome::Forward
+            }
+        };
+        if let RequestOutcome::Respond(fres) = outcome {
+            let _ = CaptureBody::new(Full::new(bytes), Side::Request, exchange.clone())
+                .collect()
+                .await;
+            return script_response(&fres, exchange, client_version);
         }
-    };
-    if let RequestOutcome::Respond(fres) = outcome {
-        let _ = CaptureBody::new(Full::new(bytes), Side::Request, exchange.clone())
-            .collect()
-            .await;
-        return script_response(&fres, exchange, client_version);
+        apply_flow_request(&freq, &mut parts, &mut bytes);
+        exchange.update_request(parts.method.as_str(), parts.uri.to_string(), &parts.headers);
     }
-    apply_flow_request(&freq, &mut parts, &mut bytes);
-    exchange.update_request(parts.method.as_str(), parts.uri.to_string(), &parts.headers);
 
     let out_body =
         CaptureBody::new(Full::new(bytes), Side::Request, exchange.clone()).boxed_unsync();
@@ -376,11 +380,14 @@ pub(super) async fn forward_with_scripts(
             return text_response(StatusCode::BAD_GATEWAY, &message);
         }
     };
-    let mut fres = flow_response_from(&res_parts, &res_bytes);
-    if let Err(e) = scripts.on_response(&freq, &mut fres) {
-        warn!("script on_response failed, leaving the response unmodified: {e:#}");
+    let body = script_body(&res_parts.headers, &res_bytes, limit).await;
+    let mut fres = flow_response_from(&res_parts, body);
+    if fres.body.decoded.is_some() {
+        if let Err(e) = scripts.on_response(&freq, &mut fres) {
+            warn!("script on_response failed, leaving the response unmodified: {e:#}");
+        }
+        apply_flow_response(&fres, &mut res_parts, &mut res_bytes);
     }
-    apply_flow_response(&fres, &mut res_parts, &mut res_bytes);
     exchange.set_response(
         res_parts.status.as_u16(),
         res_parts.version,
@@ -392,35 +399,54 @@ pub(super) async fn forward_with_scripts(
     Response::from_parts(res_parts, out_body)
 }
 
-fn flow_request_from(parts: &Parts, body: &Bytes) -> flow::Request {
+/// The body a script sees: `raw` as sent on the wire, plus `decoded` with any
+/// `Content-Encoding` removed, which is what `body` holds in the script. A
+/// `decoded` of `None` means `raw` did not decode completely within `limit`,
+/// and the hook must be skipped so the original is forwarded unchanged.
+async fn script_body(headers: &HeaderMap, raw: &Bytes, limit: usize) -> flow::Body {
+    let encoding = headers
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .collect::<Vec<_>>()
+        .join(", ");
+    flow::Body {
+        raw: raw.clone(),
+        decoded: decode_all(&encoding, raw, limit).await,
+        size: raw.len() as u64,
+        content_encoding: (!encoding.is_empty()).then_some(encoding),
+        ..Default::default()
+    }
+}
+
+/// Whether a hook wrote a new body: `set_body` in script.rs drops `decoded`
+/// and puts the new text in `raw`. An untouched body keeps its encoded `raw`.
+fn body_rewritten(body: &flow::Body) -> bool {
+    body.decoded.is_none()
+}
+
+fn flow_request_from(parts: &Parts, body: flow::Body) -> flow::Request {
     flow::Request {
         method: parts.method.to_string(),
         url: parts.uri.to_string(),
         http_version: "HTTP/1.1".to_string(),
         headers: header_pairs(&parts.headers),
-        body: flow::Body {
-            raw: body.clone(),
-            size: body.len() as u64,
-            ..Default::default()
-        },
+        body,
     }
 }
 
-fn flow_response_from(parts: &response::Parts, body: &Bytes) -> flow::Response {
+fn flow_response_from(parts: &response::Parts, body: flow::Body) -> flow::Response {
     flow::Response {
         status: parts.status.as_u16(),
         http_version: "HTTP/1.1".to_string(),
         headers: header_pairs(&parts.headers),
-        body: flow::Body {
-            raw: body.clone(),
-            size: body.len() as u64,
-            ..Default::default()
-        },
+        body,
     }
 }
 
 /// Copies a script's (possibly rewritten) request back into the parts and
-/// body bytes that get forwarded.
+/// body bytes that get forwarded. A rewritten body is plain text, so it loses
+/// the original `Content-Encoding`.
 fn apply_flow_request(freq: &flow::Request, parts: &mut Parts, bytes: &mut Bytes) {
     if let Ok(method) = Method::from_bytes(freq.method.as_bytes()) {
         parts.method = method;
@@ -433,6 +459,9 @@ fn apply_flow_request(freq: &flow::Request, parts: &mut Parts, bytes: &mut Bytes
     }
     parts.headers = headers_from_pairs(&freq.headers);
     *bytes = freq.body.raw.clone();
+    if body_rewritten(&freq.body) {
+        parts.headers.remove(header::CONTENT_ENCODING);
+    }
     if parts.headers.contains_key(header::CONTENT_LENGTH) {
         parts
             .headers
@@ -441,18 +470,21 @@ fn apply_flow_request(freq: &flow::Request, parts: &mut Parts, bytes: &mut Bytes
 }
 
 /// Copies a script's (possibly rewritten) response back into the parts and
-/// body bytes returned to the client.
+/// body bytes returned to the client. An untouched body goes out as it came,
+/// encoding and all; a rewritten one is plain text.
 fn apply_flow_response(fres: &flow::Response, parts: &mut response::Parts, bytes: &mut Bytes) {
     if let Ok(status) = StatusCode::from_u16(fres.status) {
         parts.status = status;
     }
     parts.headers = headers_from_pairs(&fres.headers);
-    *bytes = fres.body.raw.clone();
-    parts.headers.remove(header::CONTENT_ENCODING);
     parts.headers.remove(header::TRANSFER_ENCODING);
-    parts
-        .headers
-        .insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
+    if body_rewritten(&fres.body) {
+        *bytes = fres.body.raw.clone();
+        parts.headers.remove(header::CONTENT_ENCODING);
+        parts
+            .headers
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
+    }
 }
 
 fn headers_from_pairs(pairs: &[(String, String)]) -> HeaderMap {

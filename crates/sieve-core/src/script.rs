@@ -211,6 +211,8 @@ fn body_text(body: &crate::flow::Body) -> String {
 }
 
 /// Replaces the body when `text` differs from what the script was given.
+/// Clearing `decoded` is how the proxy tells a rewritten body from an
+/// untouched one, which still goes out with its original encoding.
 fn set_body(body: &mut crate::flow::Body, text: &str) {
     if text == body_text(body) {
         return;
