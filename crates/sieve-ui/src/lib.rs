@@ -30,6 +30,8 @@ const EVENT_CAPACITY: usize = 4096;
 ///
 /// When `config.listen` is not a loopback address a non-empty `config.token`
 /// is required, and every route except `/setup/*` and `/proxy.pac` demands it.
+/// On loopback every route instead refuses a Host or Origin other than
+/// `localhost`, `127.0.0.1` or `[::1]` on the bound port.
 pub async fn serve(
     config: UiConfig,
     flows: FlowSender,
@@ -48,11 +50,16 @@ pub async fn serve_with_rules(
     shutdown: CancellationToken,
     rules: Option<Arc<RuleEngine>>,
 ) -> Result<()> {
-    let app = build_with_rules(&config, &flows, extra_routes, &shutdown, rules)?;
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("binding the web UI to {}", config.listen))?;
-    tracing::info!("web UI listening on http://{}", listener.local_addr()?);
+    // The Host and Origin checks need the real port when the config says 0.
+    let config = UiConfig {
+        listen: listener.local_addr()?,
+        ..config
+    };
+    let app = build_with_rules(&config, &flows, extra_routes, &shutdown, rules)?;
+    tracing::info!("web UI listening on http://{}", config.listen);
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { shutdown.cancelled().await })
         .await
@@ -117,6 +124,11 @@ fn build_with_rules(
         app = app.layer(middleware::from_fn_with_state(
             Arc::<str>::from(token),
             auth::require_token,
+        ));
+    } else {
+        app = app.layer(middleware::from_fn_with_state(
+            config.listen.port(),
+            auth::require_local,
         ));
     }
     Ok(app)

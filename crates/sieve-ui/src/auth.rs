@@ -1,4 +1,5 @@
-//! Token check for UIs exposed beyond loopback.
+//! Token check for UIs exposed beyond loopback, and Host/Origin checks for
+//! UIs bound to it.
 
 use axum::{
     extract::{Request, State},
@@ -108,4 +109,56 @@ pub async fn require_token(
             resp
         }
     }
+}
+
+/// Names a browser may use to reach a loopback-bound UI.
+const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "[::1]"];
+
+/// Splits `host[:port]`; a missing port means 80.
+fn split_host_port(s: &str) -> Option<(&str, u16)> {
+    match s.rfind(':') {
+        // The colons inside `[::1]` are not a port separator.
+        Some(i) if !s[i..].contains(']') => Some((&s[..i], s[i + 1..].parse().ok()?)),
+        _ => Some((s, 80)),
+    }
+}
+
+fn is_local(authority: &str, port: u16) -> bool {
+    split_host_port(authority).is_some_and(|(host, p)| {
+        p == port && LOOPBACK_HOSTS.iter().any(|l| host.eq_ignore_ascii_case(l))
+    })
+}
+
+fn forbidden(reason: &str) -> Response {
+    (StatusCode::FORBIDDEN, format!("forbidden: {reason}\n")).into_response()
+}
+
+/// Stops other sites in the user's browser from reaching a loopback-bound UI:
+/// a foreign Host means DNS rebinding, a foreign Origin means CSRF or
+/// cross-site WebSocket hijacking. `port` is the port the UI is bound to.
+pub async fn require_local(State(port): State<u16>, req: Request, next: Next) -> Response {
+    let headers = req.headers();
+    // Browsers always send a Host (or an HTTP/2 authority); clients without
+    // one are not web pages.
+    let host = match headers.get(header::HOST) {
+        Some(v) => Some(v.to_str().unwrap_or_default()),
+        None => req.uri().authority().map(|a| a.as_str()),
+    };
+    if host.is_some_and(|h| !is_local(h, port)) {
+        return forbidden(&format!(
+            "open the UI at http://127.0.0.1:{port}, http://localhost:{port} or http://[::1]:{port}"
+        ));
+    }
+    // A missing Origin is fine: curl and the CLI do not send one.
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        let same = origin
+            .to_str()
+            .ok()
+            .and_then(|o| o.strip_prefix("http://"))
+            .is_some_and(|o| is_local(o, port));
+        if !same {
+            return forbidden("cross-origin request");
+        }
+    }
+    next.run(req).await
 }

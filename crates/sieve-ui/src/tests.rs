@@ -391,9 +391,15 @@ async fn unknown_api_path_is_json_404_and_ui_route_serves_html() {
 
 #[tokio::test]
 async fn websocket_streams_summaries() {
-    let h = loopback();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
+    let h = harness(
+        UiConfig {
+            listen: addr,
+            token: None,
+        },
+        Router::new(),
+    );
     let app = h.app.clone();
     tokio::spawn(async move { axum::serve(listener, app).await });
 
@@ -425,3 +431,4 @@ async fn websocket_streams_summaries() {
 }
 
 mod extra;
+mod origin;
