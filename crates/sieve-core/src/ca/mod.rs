@@ -43,7 +43,9 @@ pub enum ExportFormat {
 /// A certificate for one host, signed by the CA.
 #[derive(Debug)]
 pub struct LeafCert {
-    /// The leaf certificate. The root is not included; clients already have it.
+    /// The leaf followed by the CA. Clients that trust the CA ignore the extra
+    /// certificate, and Chrome's `--ignore-certificate-errors-spki-list` needs
+    /// the CA in the served chain to match its key.
     pub chain: Vec<CertificateDer<'static>>,
     pub key: PrivateKeyDer<'static>,
 }
@@ -171,7 +173,7 @@ impl CertAuthority {
             .signed_by(&key, &self.issuer)
             .with_context(|| format!("signing a certificate for {host}"))?;
         Ok(LeafCert {
-            chain: vec![cert.der().clone()],
+            chain: vec![cert.der().clone(), self.cert_der.clone().into()],
             key: PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
         })
     }
