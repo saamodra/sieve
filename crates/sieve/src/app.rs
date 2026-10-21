@@ -1,8 +1,8 @@
 //! Wiring shared by every subcommand: config loading and the proxy + UI session.
 
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use sieve_core::{CertAuthority, Config, Paths, flow, proxy};
 use sieve_device::ios_device::{self, SetupContext};
 use tokio_util::sync::CancellationToken;
@@ -26,8 +26,17 @@ impl Context {
     }
 }
 
-/// Runs the proxy and the web UI until Ctrl+C or until `shutdown` is cancelled.
-/// Callers that change device state run their teardown after this returns.
+/// Fails if `addr` can't be bound, so device setup can refuse before it
+/// changes anything rather than route a device to a proxy that won't start.
+pub fn ensure_port_free(addr: SocketAddr) -> Result<()> {
+    std::net::TcpListener::bind(addr)
+        .map(drop)
+        .with_context(|| format!("{addr} is not available; is another sieve already running?"))
+}
+
+/// Runs the proxy and the web UI until Ctrl+C, SIGTERM, or SIGHUP, or until
+/// `shutdown` is cancelled. Callers that change device state run their
+/// teardown after this returns.
 pub async fn run_session(
     ctx: &Context,
     ca: Arc<CertAuthority>,
@@ -36,12 +45,11 @@ pub async fn run_session(
     let flows = flow::channel();
     tokio::spawn(log_flows(flows.subscribe()));
 
-    let on_ctrl_c = shutdown.clone();
+    let on_signal = shutdown.clone();
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            info!("shutting down");
-            on_ctrl_c.cancel();
-        }
+        shutdown_signal().await;
+        info!("shutting down");
+        on_signal.cancel();
     });
 
     let setup_routes = ios_device::routes(SetupContext {
@@ -66,6 +74,34 @@ pub async fn run_session(
     );
     shutdown.cancel();
     result.map(|_| ())
+}
+
+/// Ctrl+C, plus SIGTERM (`kill`) and SIGHUP (the terminal closing) on Unix.
+/// Without the last two, sieve dies on the spot and skips device teardown,
+/// leaving the Mac or the phone pointed at a proxy that is gone.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::hangup()),
+        ) {
+            (Ok(mut term), Ok(mut hup)) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                    _ = hup.recv() => {}
+                }
+            }
+            _ => {
+                warn!("could not listen for SIGTERM/SIGHUP; only Ctrl+C stops sieve cleanly");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 async fn log_flows(mut rx: flow::FlowReceiver) {

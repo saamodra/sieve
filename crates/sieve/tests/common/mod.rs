@@ -144,12 +144,18 @@ impl Daemon {
     /// Sends SIGINT, the same signal Ctrl+C delivers, and returns the exit
     /// status. Panics if the process is still running after `timeout`.
     pub fn interrupt(&mut self, timeout: Duration) -> ExitStatus {
+        self.signal("INT", timeout)
+    }
+
+    /// Sends `SIG<name>` (`INT`, `TERM`, `HUP`) and returns the exit status.
+    /// Panics if the process is still running after `timeout`.
+    pub fn signal(&mut self, name: &str, timeout: Duration) -> ExitStatus {
         let sent = Command::new("kill")
-            .arg("-INT")
+            .arg(format!("-{name}"))
             .arg(self.child.id().to_string())
             .status()
             .expect("running kill");
-        assert!(sent.success(), "kill -INT failed");
+        assert!(sent.success(), "kill -{name} failed");
 
         let deadline = Instant::now() + timeout;
         loop {
@@ -158,7 +164,7 @@ impl Daemon {
             }
             assert!(
                 Instant::now() < deadline,
-                "sieve did not exit within {timeout:?} after SIGINT:\n{}",
+                "sieve did not exit within {timeout:?} after SIG{name}:\n{}",
                 self.output()
             );
             std::thread::sleep(Duration::from_millis(50));
