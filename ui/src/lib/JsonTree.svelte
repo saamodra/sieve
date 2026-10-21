@@ -39,11 +39,13 @@
 
 <div class="node" style:padding-left={depth ? '1.2em' : '0'}>
   {#if container && entries.length > 0}
-    <button class="tog" aria-expanded={open} onclick={() => (override = !open)}>
-      <span class="arrow">{open ? '▾' : '▸'}</span>
+    <div class="tog">
+      <button class="arrow" aria-expanded={open} aria-label={open ? 'Collapse' : 'Expand'} onclick={() => (override = !open)}>
+        {open ? '▾' : '▸'}
+      </button>
       {#if name !== null}<span class="key">{name}</span>: {/if}
-      {isArr ? '[' : '{'}{#if !open}<span class="dim">…{isArr ? ']' : '}'} {count}</span>{comma}{/if}
-    </button>
+      {isArr ? '[' : '{'}{#if !open}<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions --><span class="dim peek" onclick={() => (override = true)}>…{isArr ? ']' : '}'} {count}</span>{comma}{/if}
+    </div>
     {#if open}
       {#each entries as [k, v], i (k)}
         <JsonTree value={v} name={isArr ? null : String(k)} depth={depth + 1} {signal} last={i === entries.length - 1} />
@@ -71,25 +73,26 @@
 <style>
   .node {
     font: 12px/1.45 var(--mono);
-  }
-  .tog {
-    display: block;
-    padding: 0;
-    border: 0;
-    background: none;
-    color: inherit;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
+    user-select: text;
   }
   .arrow {
     display: inline-block;
     width: 1.2em;
     margin-left: -1.2em;
+    padding: 0;
+    border: 0;
+    background: none;
     color: var(--fg-dim);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    user-select: none;
   }
-  .tog:focus-visible {
+  .arrow:focus-visible {
     outline: 1px solid var(--accent);
+  }
+  .peek {
+    cursor: pointer;
   }
   .leaf {
     white-space: pre-wrap;
