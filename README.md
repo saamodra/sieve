@@ -1,155 +1,167 @@
 # sieve
 
-sieve is an HTTP and HTTPS debug proxy for Android and iOS, written in Rust. It runs on your Mac, terminates TLS for the devices you point at it using its own root certificate authority, and records every request as a flow. A local web UI shows the flows as they arrive. The target is a single binary with device setup automated as far as the platform allows, so that a debug app on an emulator, a Simulator, or a phone can be inspected without changing its code.
+An HTTP/HTTPS debug proxy for Android and iOS, written in Rust.
 
-## Status
+sieve runs on your Mac, intercepts TLS with its own root CA, and shows every request in a live web UI. Device setup is automated wherever the platform allows, so you can inspect a debug app on an emulator, Simulator, or phone without changing its code.
 
-sieve is pre-alpha and built in phases. The full plan, with a checklist for each phase, is in [docs/PLAN.md](docs/PLAN.md).
+> **Status: pre-alpha.** Features are implemented and covered by automated tests, but device setup has not yet been verified end to end on real hardware. See [docs/PLAN.md](docs/PLAN.md) for the roadmap and [docs/TESTING.md](docs/TESTING.md) for the manual test guide.
 
-Phases 0 to 4 are implemented: the certificate authority, the proxy (HTTP/1.1, HTTP/2, WebSocket), the web UI, and device setup for Android (modes 1 and 2), the iOS Simulator, and physical iPhones. Device setup has not yet been verified on real devices; [docs/TESTING.md](docs/TESTING.md) is the manual test guide. Phase 5 is done as needed; 5c (Frida certificate-pinning bypass on Android, plus docs for non-jailbroken iOS and Flutter) is done — see [docs/frida.md](docs/frida.md). Rules, breakpoints, and VPN mode are not started.
+## Features
 
-## Build from source
+- **MITM proxy:** HTTP/1.1, HTTP/2, and WebSocket, with gzip/br/zstd decoding for display.
+- **Live web UI:** virtualized flow table, filters, JSON tree view, copy as curl, and HAR export.
+- **Rules:** rewrite headers, body, or status; mock responses; map remote hosts; add delays; block requests.
+- **Breakpoints:** pause a request, edit it in the UI, then continue or abort.
+- **Scripting:** custom request handling with [Rhai](https://rhai.rs) scripts.
+- **One-command device setup:** Android (proxy, system CA, VPN), iOS Simulator, and physical iPhone.
+- **Certificate-pinning bypass** on Android via Frida, for apps you own or are authorized to test.
+- **Safe cleanup:** teardown and `sieve doctor` restore any proxy settings sieve changed.
+- **Single binary:** the web UI is embedded.
 
-You need a Rust toolchain (stable, with `cargo`). The current crates have no system dependencies.
+## Installation
+
+### Prebuilt binary
+
+Download the archive for your platform from [Releases](https://github.com/saamodra/sieve/releases), then:
 
 ```sh
-cargo build --release
+tar xzf sieve-*.tar.gz
+sudo mv sieve-*/sieve /usr/local/bin/
 ```
 
-The binary is written to `target/release/sieve`. You can also run it without installing:
+On macOS, if a browser download gets blocked by Gatekeeper, run `xattr -d com.apple.quarantine /usr/local/bin/sieve`.
+
+### From source
+
+Requirements: Rust 1.90+ and Node.js (for the web UI).
 
 ```sh
-cargo run -q -- --help
+git clone https://github.com/saamodra/sieve.git
+cd sieve
+(cd ui && npm ci && npm run build)   # build the UI first so it gets embedded
+cargo install --path crates/sieve
 ```
 
-The web UI lives in `ui/`, which is a Svelte and Vite project. Building it requires Node.js and npm. Build it before `cargo build` so its assets are embedded in the binary:
-
-```sh
-cd ui
-npm ci
-npm run build
-```
+This installs `sieve` into `~/.cargo/bin`, which rustup adds to your `PATH`. Check it with `sieve --help`. To update, pull and run both build commands again.
 
 ## Quick start
-
-sieve keeps its root certificate authority in its config directory. Print the location of its files with:
-
-```sh
-sieve ca path
-```
-
-Start the proxy and the web UI:
 
 ```sh
 sieve start
 ```
 
-By default the proxy listens on `127.0.0.1:8730` and the web UI on `http://localhost:8731`. Both addresses can be changed with `--listen` and `--ui-listen`, and `--passthrough <HOST>` tunnels a host without intercepting it. `--upstream-ca <PEM>` (repeatable, or `upstream_ca_files` under `[proxy]` in `config.toml`) trusts extra roots when verifying upstream servers, such as a local backend with its own CA. Requests appear in the web UI as they arrive.
+| Service | Default address         |
+| ------- | ----------------------- |
+| Proxy   | `127.0.0.1:8730`        |
+| Web UI  | `http://localhost:8731` |
 
-To trust the CA on a device, export it:
+Check that it works:
 
 ```sh
 sieve ca export --format pem -o sieve-ca.pem
+curl -x http://127.0.0.1:8730 --cacert sieve-ca.pem https://example.com
 ```
 
-The `--format` option accepts `pem`, `der`, and `cer`. Leaving out `-o` writes the certificate to standard output. The device setup commands below export and install the certificate for you where they can.
+Useful flags for `sieve start`:
+
+| Flag                  | Purpose                                         |
+| --------------------- | ----------------------------------------------- |
+| `--listen`            | Proxy address                                   |
+| `--ui-listen`         | Web UI address                                  |
+| `--passthrough HOST`  | Tunnel a host without intercepting it           |
+| `--upstream-ca PEM`   | Trust an extra root CA for upstream servers     |
+| `--max-body-bytes N`  | Body size limit per flow (default 5 MiB)        |
 
 ## Device setup
 
-Each platform has its own setup command. Run `sieve --help` or `sieve <command> --help` to see the options for each one.
+| Platform                     | Command                    | Notes                                              |
+| ---------------------------- | -------------------------- | -------------------------------------------------- |
+| Android, no root             | `sieve android setup`      | Uses `adb reverse` and `http_proxy`                |
+| Android, emulator or rooted  | `sieve android inject-ca`  | Installs the CA into the system store              |
+| Android, apps that ignore the proxy | `sieve android vpn` | Needs the [companion app](android-vpn/README.md)  |
+| Android, pinned apps         | `sieve android frida`      | See [docs/frida.md](docs/frida.md)                 |
+| iOS Simulator (macOS)        | `sieve ios-sim setup`      | See [docs/ios-simulator.md](docs/ios-simulator.md) |
+| iPhone                       | `sieve ios-device setup`   | Scan the QR code on the same Wi-Fi network         |
 
-### Android, mode 1 (no root, your own debug app)
+Run `sieve <command> --help` for all options.
 
-`sieve android setup` routes the device through sieve over USB. It runs `adb reverse` so the device can reach the proxy on `127.0.0.1:8730`, sets the device's `http_proxy` to the proxy, and starts the proxy. Use `--serial <SERIAL>` when more than one device is connected; serials are listed by `adb devices`.
+### Android
 
-Install the CA on the device once, through Settings, Security, Install certificate. The setup command pushes the file to `/sdcard/Download/sieve-ca.crt`.
+```sh
+sieve android setup       # route the device through sieve
+sieve android teardown    # undo when done
+```
 
-Apps that target Android 7 or later do not trust user-installed certificates unless they opt in. For debug builds of your own app, `sieve android nsc` prints a `network_security_config.xml` snippet with a `debug-overrides` block that trusts user certificates, and the manifest line to add. Use it only for builds you control.
+Install the CA from `/sdcard/Download/sieve-ca.crt` via **Settings → Security → Install certificate**. Apps targeting Android 7+ ignore user CAs by default. For your own debug build, `sieve android nsc` prints the `network_security_config.xml` snippet you need.
 
-Run `sieve android teardown` when you are done. It clears `http_proxy` and removes the `adb reverse` rule.
+`inject-ca` requires a **Google APIs** emulator image (not Google Play) or a rooted device. It does not survive a reboot.
 
-### Android, mode 2 (emulator or rooted device)
+### iOS Simulator
 
-`sieve android inject-ca` installs the CA into the system certificate store, so apps that trust the system store will accept it without changes to their code. It requires either a Google APIs emulator image or a rooted device, because the store is not writable otherwise. Google Play images do not allow `adb root`. Injection is not persistent: it is lost on reboot, so run the command again after a restart.
+`sieve ios-sim setup` trusts the CA in every booted Simulator and sets the Mac's system proxy. Only Simulator traffic is intercepted; other Mac apps are tunneled untouched (pass `--intercept-mac` to intercept them too). `sieve ios-sim teardown` restores your previous settings.
 
-### Android, VPN mode (apps that ignore the proxy)
+### iPhone
 
-`sieve android vpn` pairs with the companion app in [`android-vpn/`](android-vpn/README.md), which captures all TCP on the device through a `VpnService` and forwards it to sieve. Use it for apps that bypass `http_proxy`. The command sets up `adb reverse`, pushes the CA, opens the app, and runs the proxy; build and install the app first (see its README). It has not yet been verified on a device. There is no iOS equivalent, because a NetworkExtension needs a paid Apple Developer account.
+1. Run `sieve ios-device setup` and scan the QR code.
+2. Install the profile, then enable it under **Settings → General → About → Certificate Trust Settings**.
+3. Set the Wi-Fi proxy to **Automatic** with the PAC URL shown on the setup page.
 
-### iOS Simulator (macOS only)
+The setup page shows a green check once HTTPS traffic arrives.
 
-`sieve ios-sim setup` trusts the CA in every booted Simulator, sets the Mac's system web proxy and secure web proxy on the active network service, and starts the proxy. The Mac system proxy applies to the whole machine, so every app on the Mac sends its traffic through sieve while it runs, but only connections from inside the Simulator are intercepted. The Mac's own apps are tunneled untouched and keep working; pass `--intercept-mac` to intercept them too. The previous proxy settings are saved and restored by `sieve ios-sim teardown`. If the restore does not happen, see [Reset if something is left behind](#reset-if-something-is-left-behind).
+## Rules and scripts
 
-### Physical iPhone
+Rules live in `rules.toml` (or `rules.json`) in the config directory. sieve watches the file, so edits apply right away. You can also edit rules from the web UI. Rhai scripts go in the `scripts/` subdirectory. `sieve ca path` prints the CA file paths, which are in the same directory.
 
-`sieve ios-device setup` listens on the local network and prints a QR code. Scan it with the iPhone's camera to open the setup page, which offers the configuration profile (containing the CA) and a proxy auto-configuration URL. The profile is not signed, so iOS shows it as not verified; that is expected. Then:
+## Cleanup
 
-1. Install the profile from Settings.
-2. Enable it under Settings, General, About, Certificate Trust Settings. The profile has no effect on HTTPS until this step is done.
-3. Set the Wi-Fi proxy to Automatic and enter the proxy auto-configuration URL shown on the setup page.
+Teardown commands and Ctrl+C restore everything sieve changed. If a session crashed:
 
-The setup page shows a green check once HTTPS traffic from the phone arrives. The phone and the Mac must be on the same network.
+```sh
+sieve doctor             # list leftover state
+sieve doctor --restore   # restore the Mac proxy and Android http_proxy
+```
 
-## Reset if something is left behind
+<details>
+<summary>Manual reset</summary>
 
-Normally the teardown commands and Ctrl+C restore everything sieve changed. If sieve exits unexpectedly, or a setup was interrupted, run the matching reset commands below.
-
-Android, device proxy and USB routing:
+Android:
 
 ```sh
 adb shell settings put global http_proxy :0
-adb reverse --remove-all
+adb reverse --remove-all   # removes all reverse rules
 ```
 
-The first command clears the device's proxy setting. The second removes every `adb reverse` rule on all devices, so only use it when you do not need other reverse rules.
-
-Mac system proxy, which is changed by `sieve ios-sim setup`:
+macOS system proxy:
 
 ```sh
 networksetup -listallnetworkservices
-networksetup -setwebproxystate <service> off
-networksetup -setsecurewebproxystate <service> off
+networksetup -setwebproxystate "Wi-Fi" off
+networksetup -setsecurewebproxystate "Wi-Fi" off
 ```
 
-Replace `<service>` with the network service you use, such as `Wi-Fi`. The first command lists the names.
-
-sieve also saves the proxy settings it replaces: the Mac's, and each Android device's previous `http_proxy`. `sieve android teardown` puts the device's old value back, not just `:0`. To see what a crashed run left behind, or to restore it, run:
-
-```sh
-sieve doctor            # list leftover state
-sieve doctor --restore
-```
-
-`sieve doctor --restore` restores the Mac proxy settings and the Android `http_proxy` values saved by a setup that did not tear down. An Android device must be connected for its value to be restored; otherwise it is skipped and its state file is kept for the next run. It does not remove `adb reverse` rules; use `sieve android teardown` or the manual commands above for that. Use the manual commands above if it does not restore the settings you expect.
+</details>
 
 ## Troubleshooting
 
-**The iPhone shows the profile as installed, but HTTPS fails.** Certificate Trust Settings was not enabled for the profile. Enable it under Settings, General, About, Certificate Trust Settings.
-
-**The Android device has no internet after a session.** The device's `http_proxy` is still set. Run `adb shell settings put global http_proxy :0` (see [Reset if something is left behind](#reset-if-something-is-left-behind)).
-
-**An Android emulator cannot run `adb root`.** The image is a Google Play image. Use a Google APIs image instead, which allows root for system certificate injection.
-
-**Certificate pinning.** An app that pins its certificates rejects the sieve certificate, and its requests fail even when the CA is trusted. sieve does not bypass pinning for apps you do not own. A TLS handshake failure in sieve for a host usually means pinning or an untrusted CA, not a missing connection. Use `--passthrough <HOST>` to leave a host alone when it is unrelated to your debugging. Bypassing pinning with Frida is planned for Phase 5 and is limited to apps you own or are authorized to test.
-
-**HTTP/3 and QUIC.** Some apps send traffic over UDP using HTTP/3 (QUIC), which bypasses the proxy. sieve does not intercept QUIC. Block UDP port 443 on the device or network so the app falls back to HTTP/2 or HTTP/1.1 over TCP. HTTP/3 support is out of scope for v1.
-
-**Flutter apps ignore the system proxy.** Flutter's networking stack does not use the system proxy or the operating system certificate store. Traffic from a Flutter app does not appear in sieve unless the app is configured to use the proxy in its Dart code during debugging, or a Frida-based approach is used (planned, Phase 5).
-
-**Leaf certificates without a SAN.** Modern operating systems reject a leaf certificate that has no Subject Alternative Name, even when the Common Name matches. sieve issues leaf certificates with the host in the SAN.
+| Problem                                   | Fix                                                                         |
+| ----------------------------------------- | --------------------------------------------------------------------------- |
+| iPhone profile installed but HTTPS fails  | Enable it in **Certificate Trust Settings**                                 |
+| Android has no internet after a session   | `sieve doctor --restore`, or clear `http_proxy` (see above)                 |
+| `adb root` fails on the emulator          | Use a Google APIs image, not Google Play                                    |
+| TLS handshake fails for a host            | Usually certificate pinning. Use `sieve android frida` or `--passthrough`   |
+| App traffic is missing entirely           | It may use HTTP/3 (block UDP 443) or ignore the proxy (use VPN mode)        |
+| Flutter app traffic is missing            | Flutter ignores the system proxy. See [docs/frida.md](docs/frida.md)        |
 
 ## Responsible use
 
-Use sieve only on apps and devices that you own or are explicitly authorized to test. Intercepting traffic from another person's device, or from an app whose owner has not agreed to it, is not something this tool is for. Installing a root CA on a device gives the holder of its private key the ability to read that device's HTTPS traffic, so keep the CA key private (its file is created with permission 600) and regenerate the CA with `sieve ca regenerate` if it may have been exposed.
+Use sieve only on apps and devices you own or are explicitly authorized to test. Anyone with the CA private key can read the HTTPS traffic of devices that trust it. Keep the key private, and run `sieve ca regenerate` if it may have been exposed.
 
-## Development
+## Contributing
 
-Contributor guidance, the crate layout, and the cross-crate contracts are in [AGENTS.md](AGENTS.md). Before every commit, run the three verification commands:
+See [AGENTS.md](AGENTS.md) for the project layout and conventions. Before opening a PR, run:
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
-
-Automated tests must not change host or device state, and must bind test servers to `127.0.0.1` on port 0. See AGENTS.md for the details.
