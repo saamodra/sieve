@@ -24,14 +24,29 @@
 //! and `status`, `headers` and `body` (response). `headers` is an array of
 //! `[name, value]` pairs; the methods `headers.header(name)`,
 //! `headers.set_header(name, value)` and `headers.remove_header(name)` work
-//! on it (call them method-style so the change sticks). Bodies are exposed as text (lossy UTF-8) and are only written back
-//! when the script changed them. `req.respond = #{ status, headers, body }`
-//! answers the request without contacting the server.
+//! on it (call them method-style so the change sticks).
+//! `req.respond = #{ status, headers, body }` answers the request without
+//! contacting the server.
 //!
-//! Hook point: the proxy does not call this module yet. The rules engine
-//! (phase 5a) should run [`ScriptEngine::on_request`] before forwarding a
-//! request, and [`ScriptEngine::on_response`] on the upstream response before
-//! it is returned to the client.
+//! Bodies are exposed as text (lossy UTF-8) with any `Content-Encoding`
+//! (gzip, br, zstd, deflate) removed. A body the script left alone is
+//! forwarded exactly as it arrived, encoding included; a body it changed is
+//! sent as plain text without `Content-Encoding`.
+//!
+//! The proxy runs the hooks on intercepted HTTP requests that no declarative
+//! rule matched (rules win), and not on connections that `intercept_processes`
+//! excludes. [`ScriptEngine::on_request`] runs before the request is forwarded,
+//! and [`ScriptEngine::on_response`] on the upstream response before the
+//! client gets it. A script that fails is logged and skipped; changes made by
+//! the scripts before it still apply.
+//!
+//! Hooks see whole bodies, so the proxy reads a body into memory before
+//! running them, but never more than `max_body_bytes` of it. A larger body,
+//! one that does not decode within that limit, or one with trailers, is
+//! forwarded untouched and skips its hook: `on_request` does not run for that
+//! request (`on_response` then sees an empty `req.body`), and `on_response`
+//! does not run for that response. `text/event-stream` responses are never
+//! buffered, so server-sent events never reach `on_response`.
 
 use std::path::Path;
 
@@ -211,6 +226,8 @@ fn body_text(body: &crate::flow::Body) -> String {
 }
 
 /// Replaces the body when `text` differs from what the script was given.
+/// Clearing `decoded` is how the proxy tells a rewritten body from an
+/// untouched one, which still goes out with its original encoding.
 fn set_body(body: &mut crate::flow::Body, text: &str) {
     if text == body_text(body) {
         return;
