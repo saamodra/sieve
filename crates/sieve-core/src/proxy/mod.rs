@@ -1,19 +1,577 @@
-//! The MITM proxy. Implemented in phase 1b.
+//! The MITM proxy: plain HTTP proxying, CONNECT tunnels with TLS interception,
+//! WebSocket upgrades, and per-host passthrough.
+//!
+//! Built on hyper and tokio-rustls directly rather than hudsucker, because
+//! hudsucker only logs a failed client TLS handshake, and sieve has to report
+//! it as a flow so a pinned or untrusting client shows up in the UI.
 
-use std::sync::Arc;
+mod capture;
+mod decode;
+mod io;
+mod tls;
+mod tunnel;
 
-use anyhow::{Result, bail};
+use std::{
+    convert::Infallible,
+    error::Error as StdError,
+    net::SocketAddr,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+use anyhow::{Context as _, Result};
+use bytes::Bytes;
+use http::{
+    HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri, Version,
+    header,
+    uri::{Authority, Scheme},
+};
+use http_body_util::{BodyExt, Empty, Full, combinators::UnsyncBoxBody};
+use hyper::{body::Incoming, service::service_fn};
+use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+use hyper_util::{
+    client::legacy::{Client, connect::HttpConnector},
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto,
+};
+use rustls::pki_types::CertificateDer;
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
-use crate::{ca::CertAuthority, config::ProxyConfig, flow::FlowSender};
+use self::capture::{CaptureBody, Exchange, RequestHead, Side};
+use crate::{
+    ca::CertAuthority,
+    config::ProxyConfig,
+    flow::{FlowId, FlowKind, FlowSender},
+};
+
+pub(crate) type BoxError = Box<dyn StdError + Send + Sync>;
+type ProxyBody = UnsyncBoxBody<Bytes, BoxError>;
+type UpstreamClient = Client<HttpsConnector<HttpConnector>, ProxyBody>;
 
 /// Serves the proxy on `config.listen` until `shutdown` is cancelled,
 /// publishing every exchange on `flows`.
 pub async fn run(
-    _config: ProxyConfig,
-    _ca: Arc<CertAuthority>,
-    _flows: FlowSender,
-    _shutdown: CancellationToken,
+    config: ProxyConfig,
+    ca: Arc<CertAuthority>,
+    flows: FlowSender,
+    shutdown: CancellationToken,
 ) -> Result<()> {
-    bail!("proxy is not implemented yet (phase 1b)")
+    let listener = TcpListener::bind(config.listen)
+        .await
+        .with_context(|| format!("binding the proxy to {}", config.listen))?;
+    Proxy::new(config, ca, flows)
+        .serve(listener, shutdown)
+        .await
+}
+
+/// A configured proxy that is not serving yet. [`run`] covers the usual case;
+/// this is for callers that bind their own listener or need to trust extra
+/// upstream roots, such as tests against a local TLS server.
+pub struct Proxy {
+    config: ProxyConfig,
+    ca: Arc<CertAuthority>,
+    flows: FlowSender,
+    upstream_roots: Vec<CertificateDer<'static>>,
+}
+
+impl Proxy {
+    pub fn new(config: ProxyConfig, ca: Arc<CertAuthority>, flows: FlowSender) -> Self {
+        Self {
+            config,
+            ca,
+            flows,
+            upstream_roots: Vec::new(),
+        }
+    }
+
+    /// Trusts `cert_der` as a root when verifying upstream servers, on top of
+    /// the Mozilla roots and the OS trust store.
+    pub fn trust_upstream_root(mut self, cert_der: impl Into<Vec<u8>>) -> Self {
+        self.upstream_roots
+            .push(CertificateDer::from(cert_der.into()));
+        self
+    }
+
+    /// Accepts connections on `listener` until `shutdown` is cancelled.
+    pub async fn serve(self, listener: TcpListener, shutdown: CancellationToken) -> Result<()> {
+        let upstream = tls::upstream_config(&self.upstream_roots)?;
+        let shared = Arc::new(Shared {
+            client: upstream_client(upstream.clone(), true),
+            upgrade_client: upstream_client(upstream, false),
+            config: self.config,
+            ca: self.ca,
+            flows: self.flows,
+            next_id: AtomicU64::new(1),
+            shutdown: shutdown.clone(),
+        });
+        info!("proxy listening on {}", listener.local_addr()?);
+
+        loop {
+            let (stream, peer) = tokio::select! {
+                () = shutdown.cancelled() => return Ok(()),
+                accepted = listener.accept() => match accepted {
+                    Ok(accepted) => accepted,
+                    Err(e) => {
+                        // Usually out of file descriptors; back off instead of spinning.
+                        warn!("accepting a proxy connection failed: {e}");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                },
+            };
+            let _ = stream.set_nodelay(true);
+            let conn = Conn {
+                shared: shared.clone(),
+                client: peer,
+                tunnel: None,
+            };
+            tokio::spawn(serve_http(conn, TokioIo::new(stream)));
+        }
+    }
+}
+
+fn upstream_client(tls: rustls::ClientConfig, http2: bool) -> UpstreamClient {
+    let mut http = HttpConnector::new();
+    http.enforce_http(false);
+    http.set_nodelay(true);
+    http.set_connect_timeout(Some(Duration::from_secs(30)));
+    let builder = HttpsConnectorBuilder::new()
+        .with_tls_config(tls)
+        .https_or_http()
+        .enable_http1();
+    // WebSocket upgrades need HTTP/1.1, so their client does not offer h2.
+    let connector = if http2 {
+        builder.enable_http2().wrap_connector(http)
+    } else {
+        builder.wrap_connector(http)
+    };
+    Client::builder(TokioExecutor::new()).build(connector)
+}
+
+struct Shared {
+    config: ProxyConfig,
+    ca: Arc<CertAuthority>,
+    flows: FlowSender,
+    client: UpstreamClient,
+    upgrade_client: UpstreamClient,
+    next_id: AtomicU64,
+    shutdown: CancellationToken,
+}
+
+impl Shared {
+    fn exchange(&self, client: SocketAddr, kind: FlowKind, head: RequestHead<'_>) -> Arc<Exchange> {
+        let id: FlowId = self.next_id.fetch_add(1, Ordering::Relaxed);
+        Exchange::new(
+            id,
+            client,
+            kind,
+            head,
+            self.flows.clone(),
+            self.config.max_body_bytes,
+        )
+    }
+
+    fn is_passthrough(&self, host: &str) -> bool {
+        is_passthrough(&self.config.passthrough_hosts, host)
+    }
+}
+
+/// An intercepted CONNECT tunnel: requests inside it carry only a path, so the
+/// target comes from the tunnel.
+struct Tunnel {
+    scheme: Scheme,
+    authority: Authority,
+    requests: AtomicUsize,
+}
+
+/// One client connection, either to the proxy port or inside a tunnel.
+#[derive(Clone)]
+struct Conn {
+    shared: Arc<Shared>,
+    client: SocketAddr,
+    tunnel: Option<Arc<Tunnel>>,
+}
+
+/// Serves HTTP/1.1 or h2 on `io`. Boxed because a CONNECT handled here serves
+/// the tunnel's inner connection with this function again.
+fn serve_http<I>(conn: Conn, io: I) -> Pin<Box<dyn Future<Output = ()> + Send>>
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    Box::pin(async move {
+        let shutdown = conn.shared.shutdown.clone();
+        let client = conn.client;
+        let service = service_fn(move |req| conn.clone().handle(req));
+        let builder = auto::Builder::new(TokioExecutor::new());
+        let connection = builder.serve_connection_with_upgrades(io, service);
+        tokio::select! {
+            result = connection => {
+                if let Err(e) = result {
+                    debug!("connection from {client} ended: {e}");
+                }
+            }
+            () = shutdown.cancelled() => {}
+        }
+    })
+}
+
+impl Conn {
+    async fn handle(self, req: Request<Incoming>) -> Result<Response<ProxyBody>, Infallible> {
+        if let Some(tunnel) = &self.tunnel {
+            tunnel.requests.fetch_add(1, Ordering::Relaxed);
+        }
+        if req.method() == Method::CONNECT {
+            return Ok(match self.tunnel {
+                None => self.connect(req).await,
+                Some(_) => {
+                    text_response(StatusCode::BAD_REQUEST, "nested CONNECT is not supported")
+                }
+            });
+        }
+        Ok(match self.target(&req) {
+            Some(uri) if is_websocket_upgrade(&req) => self.upgrade(req, uri).await,
+            Some(uri) => self.forward(req, uri).await,
+            None => text_response(
+                StatusCode::BAD_REQUEST,
+                "sieve is a proxy: configure it as the HTTP(S) proxy instead of requesting it directly",
+            ),
+        })
+    }
+
+    /// The absolute URI to send upstream.
+    fn target(&self, req: &Request<Incoming>) -> Option<Uri> {
+        match &self.tunnel {
+            Some(tunnel) => {
+                let path = req.uri().path_and_query().map_or("/", |p| p.as_str());
+                Uri::builder()
+                    .scheme(tunnel.scheme.clone())
+                    .authority(tunnel.authority.clone())
+                    .path_and_query(path)
+                    .build()
+                    .ok()
+            }
+            None => (req.uri().scheme().is_some() && req.uri().authority().is_some())
+                .then(|| req.uri().clone()),
+        }
+    }
+
+    fn exchange(&self, kind: FlowKind, req: &Request<Incoming>, url: String) -> Arc<Exchange> {
+        self.shared.exchange(
+            self.client,
+            kind,
+            RequestHead {
+                method: req.method().as_str(),
+                url,
+                version: req.version(),
+                headers: req.headers(),
+            },
+        )
+    }
+
+    async fn forward(&self, req: Request<Incoming>, uri: Uri) -> Response<ProxyBody> {
+        let exchange = self.exchange(FlowKind::Http, &req, uri.to_string());
+        exchange.emit_start();
+        let client_version = req.version();
+
+        let (mut parts, body) = req.into_parts();
+        parts.uri = uri;
+        // The upstream client picks HTTP/1.1 or h2 from ALPN, whatever the client spoke.
+        parts.version = Version::HTTP_11;
+        strip_hop_by_hop(&mut parts.headers, false);
+        parts.headers.remove(header::HOST);
+        let body = CaptureBody::new(body, Side::Request, exchange.clone()).boxed_unsync();
+
+        match self
+            .shared
+            .client
+            .request(Request::from_parts(parts, body))
+            .await
+        {
+            Ok(res) => respond(res, exchange, client_version),
+            Err(e) => upstream_failed(&exchange, &e),
+        }
+    }
+
+    async fn upgrade(&self, mut req: Request<Incoming>, uri: Uri) -> Response<ProxyBody> {
+        let exchange = self.exchange(FlowKind::WebSocket, &req, websocket_url(&uri));
+        exchange.emit_start();
+        let client_version = req.version();
+        let client_upgrade = hyper::upgrade::on(&mut req);
+
+        let (mut parts, body) = req.into_parts();
+        parts.uri = uri;
+        parts.version = Version::HTTP_11;
+        strip_hop_by_hop(&mut parts.headers, true);
+        parts.headers.remove(header::HOST);
+        let body = CaptureBody::new(body, Side::Request, exchange.clone()).boxed_unsync();
+
+        let request = Request::from_parts(parts, body);
+        let mut res = match self.shared.upgrade_client.request(request).await {
+            Ok(res) => res,
+            Err(e) => return upstream_failed(&exchange, &e),
+        };
+        if res.status() != StatusCode::SWITCHING_PROTOCOLS {
+            return respond(res, exchange, client_version);
+        }
+
+        // The flow covers the handshake; messages are relayed but not recorded.
+        exchange.set_response(res.status().as_u16(), res.version(), res.headers());
+        exchange.finish(None, None);
+        let server_upgrade = hyper::upgrade::on(&mut res);
+        let shutdown = self.shared.shutdown.clone();
+        tokio::spawn(async move {
+            let (client, server) = match tokio::try_join!(client_upgrade, server_upgrade) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    debug!("WebSocket upgrade failed: {e}");
+                    return;
+                }
+            };
+            let (mut client, mut server) = (TokioIo::new(client), TokioIo::new(server));
+            tokio::select! {
+                result = tokio::io::copy_bidirectional(&mut client, &mut server) => {
+                    if let Err(e) = result {
+                        debug!("WebSocket relay ended: {e}");
+                    }
+                }
+                () = shutdown.cancelled() => {}
+            }
+        });
+
+        let (mut parts, _) = res.into_parts();
+        strip_hop_by_hop(&mut parts.headers, true);
+        Response::from_parts(parts, empty_body())
+    }
+
+    async fn connect(&self, req: Request<Incoming>) -> Response<ProxyBody> {
+        let Some(authority) = req.uri().authority().cloned() else {
+            return text_response(StatusCode::BAD_REQUEST, "CONNECT needs a host:port target");
+        };
+        let head = tunnel::ConnectHead {
+            authority,
+            version: req.version(),
+            headers: req.headers().clone(),
+        };
+        if self.shared.is_passthrough(head.authority.host()) {
+            return tunnel::passthrough(self.clone(), req, head).await;
+        }
+        let conn = self.clone();
+        tokio::spawn(async move {
+            match hyper::upgrade::on(req).await {
+                Ok(upgraded) => tunnel::intercept(conn, upgraded, head).await,
+                Err(e) => debug!("CONNECT upgrade failed: {e}"),
+            }
+        });
+        Response::new(empty_body())
+    }
+
+    fn in_tunnel(&self, tunnel: Arc<Tunnel>) -> Self {
+        Self {
+            tunnel: Some(tunnel),
+            ..self.clone()
+        }
+    }
+}
+
+/// Passes an upstream response to the client while capturing its body.
+fn respond(
+    res: Response<Incoming>,
+    exchange: Arc<Exchange>,
+    client_version: Version,
+) -> Response<ProxyBody> {
+    exchange.set_response(res.status().as_u16(), res.version(), res.headers());
+    let (mut parts, body) = res.into_parts();
+    strip_hop_by_hop(&mut parts.headers, false);
+    parts.version = client_version;
+    let body = CaptureBody::new(body, Side::Response, exchange).boxed_unsync();
+    Response::from_parts(parts, body)
+}
+
+fn upstream_failed(exchange: &Exchange, error: &(dyn StdError + 'static)) -> Response<ProxyBody> {
+    let message = format!("upstream request failed: {}", error_chain(error));
+    exchange.finish(None, Some(message.clone()));
+    text_response(StatusCode::BAD_GATEWAY, &message)
+}
+
+/// `error` and its sources, joined, since hyper's top-level messages are vague.
+fn error_chain(error: &(dyn StdError + 'static)) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(e) = source {
+        let text = e.to_string();
+        if !parts.iter().any(|p| p.contains(&text)) {
+            parts.push(text);
+        }
+        source = e.source();
+    }
+    parts.join(": ")
+}
+
+fn text_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
+    let mut res = Response::new(
+        Full::new(Bytes::from(format!("sieve: {message}\n")))
+            .map_err(|never| match never {})
+            .boxed_unsync(),
+    );
+    *res.status_mut() = status;
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    res
+}
+
+fn empty_body() -> ProxyBody {
+    Empty::new().map_err(|never| match never {}).boxed_unsync()
+}
+
+fn is_websocket_upgrade<B>(req: &Request<B>) -> bool {
+    let has_token = |name, token: &str| {
+        req.headers().get_all(name).iter().any(|v| {
+            v.to_str()
+                .is_ok_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case(token)))
+        })
+    };
+    req.version() <= Version::HTTP_11
+        && has_token(header::CONNECTION, "upgrade")
+        && has_token(header::UPGRADE, "websocket")
+}
+
+fn websocket_url(uri: &Uri) -> String {
+    let url = uri.to_string();
+    if let Some(rest) = url.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        url
+    }
+}
+
+/// Removes headers that apply to one connection only. With `keep_upgrade`,
+/// `Connection: upgrade` and `Upgrade` survive for a WebSocket handshake.
+fn strip_hop_by_hop(headers: &mut HeaderMap, keep_upgrade: bool) {
+    let listed: Vec<HeaderName> = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .filter_map(|name| HeaderName::from_bytes(name.trim().as_bytes()).ok())
+        .collect();
+    for name in listed {
+        if !(keep_upgrade && name == header::UPGRADE) {
+            headers.remove(name);
+        }
+    }
+    // `te: trailers` is allowed end to end and gRPC needs it.
+    if headers
+        .get(header::TE)
+        .is_some_and(|v| !v.as_bytes().eq_ignore_ascii_case(b"trailers"))
+    {
+        headers.remove(header::TE);
+    }
+    for name in [
+        "keep-alive",
+        "proxy-connection",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "trailer",
+        "transfer-encoding",
+    ] {
+        headers.remove(name);
+    }
+    if keep_upgrade {
+        headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+    } else {
+        headers.remove(header::CONNECTION);
+        headers.remove(header::UPGRADE);
+    }
+}
+
+/// Matches a host against `passthrough_hosts`: exact names, or `*.example.com`
+/// for any subdomain of example.com.
+fn is_passthrough(patterns: &[String], host: &str) -> bool {
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    patterns.iter().any(|pattern| {
+        let pattern = pattern.trim().trim_end_matches('.').to_ascii_lowercase();
+        match pattern.strip_prefix("*.") {
+            Some(suffix) => host
+                .strip_suffix(suffix)
+                .is_some_and(|rest| rest.ends_with('.')),
+            None => host == pattern,
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn passthrough_matches_exact_and_wildcard_hosts() {
+        let patterns = vec!["pinned.example".to_string(), "*.apple.com".to_string()];
+        assert!(is_passthrough(&patterns, "pinned.example"));
+        assert!(is_passthrough(&patterns, "PINNED.example."));
+        assert!(!is_passthrough(&patterns, "sub.pinned.example"));
+        assert!(is_passthrough(&patterns, "gs.apple.com"));
+        assert!(is_passthrough(&patterns, "a.b.apple.com"));
+        assert!(!is_passthrough(&patterns, "apple.com"));
+        assert!(!is_passthrough(&patterns, "notapple.com"));
+        assert!(is_passthrough(&["::1".to_string()], "[::1]"));
+    }
+
+    #[test]
+    fn strips_hop_by_hop_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONNECTION,
+            HeaderValue::from_static("keep-alive, x-private"),
+        );
+        headers.insert("x-private", HeaderValue::from_static("1"));
+        headers.insert("proxy-connection", HeaderValue::from_static("keep-alive"));
+        headers.insert(header::TE, HeaderValue::from_static("gzip"));
+        headers.insert(header::ACCEPT, HeaderValue::from_static("*/*"));
+        strip_hop_by_hop(&mut headers, false);
+        assert_eq!(headers.len(), 1);
+        assert!(headers.contains_key(header::ACCEPT));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::TE, HeaderValue::from_static("trailers"));
+        strip_hop_by_hop(&mut headers, false);
+        assert!(headers.contains_key(header::TE));
+    }
+
+    #[test]
+    fn keeps_the_websocket_handshake_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+        headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+        headers.insert("sec-websocket-key", HeaderValue::from_static("abc"));
+        strip_hop_by_hop(&mut headers, true);
+        assert_eq!(headers[header::CONNECTION], "upgrade");
+        assert_eq!(headers[header::UPGRADE], "websocket");
+        assert!(headers.contains_key("sec-websocket-key"));
+    }
+
+    #[test]
+    fn websocket_urls_use_ws_schemes() {
+        assert_eq!(
+            websocket_url(&"https://example.com/socket".parse().unwrap()),
+            "wss://example.com/socket"
+        );
+        assert_eq!(
+            websocket_url(&"http://example.com/".parse().unwrap()),
+            "ws://example.com/"
+        );
+    }
 }
