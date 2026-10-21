@@ -211,7 +211,7 @@ pub fn find_leftover(state_dir: &Path) -> Result<Option<LeftoverState>> {
 }
 
 /// Sets the system proxy, awaits `session`, and restores the old settings
-/// however the session ended.
+/// however the session ended, including a panic or this future being dropped.
 pub async fn run_guarded<F>(
     runner: &dyn CommandRunner,
     state_dir: &Path,
@@ -222,8 +222,14 @@ where
     F: Future<Output = Result<()>>,
 {
     apply(runner, state_dir, port)?;
+    let mut guard = RestoreOnDrop {
+        runner,
+        file: state_file(state_dir),
+        armed: true,
+    };
     let result = session.await;
-    let restored = restore(runner, &state_file(state_dir));
+    guard.armed = false;
+    let restored = restore(runner, &guard.file);
     match (result, restored) {
         (Ok(()), restored) => restored,
         (Err(e), Ok(())) => Err(e),
@@ -231,8 +237,27 @@ where
     }
 }
 
+/// Restores the Mac proxy if [`run_guarded`] never reaches its own restore.
+struct RestoreOnDrop<'a> {
+    runner: &'a dyn CommandRunner,
+    file: PathBuf,
+    armed: bool,
+}
+
+impl Drop for RestoreOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.armed
+            && let Err(e) = restore(self.runner, &self.file)
+        {
+            warn!("restoring the Mac proxy failed: {e:#}; run `sieve doctor --restore`");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::super::runner::mock::MockRunner;
     use super::*;
 
@@ -361,6 +386,23 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("proxy died"));
+        let m = r.mutations();
+        assert_eq!(m[2], "networksetup -setwebproxystate Wi-Fi off");
+        assert_eq!(m[3], "networksetup -setsecurewebproxystate Wi-Fi off");
+        assert!(find_leftover(dir.path()).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn restores_when_the_session_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = runner(OFF, OFF);
+        let session = std::future::pending::<Result<()>>();
+        let timed_out = tokio::time::timeout(
+            Duration::from_millis(10),
+            run_guarded(&r, dir.path(), 8080, session),
+        )
+        .await;
+        assert!(timed_out.is_err());
         let m = r.mutations();
         assert_eq!(m[2], "networksetup -setwebproxystate Wi-Fi off");
         assert_eq!(m[3], "networksetup -setsecurewebproxystate Wi-Fi off");

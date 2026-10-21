@@ -8,6 +8,7 @@
 mod capture;
 mod decode;
 mod io;
+mod peer;
 mod tls;
 mod tunnel;
 
@@ -40,7 +41,7 @@ use hyper_util::{
     server::conn::auto,
 };
 use rustls::pki_types::{CertificateDer, pem::PemObject};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -125,6 +126,7 @@ impl Proxy {
             config: self.config,
             ca: self.ca,
             flows: self.flows,
+            muted: broadcast::channel(1).0,
             next_id: AtomicU64::new(1),
             shutdown: shutdown.clone(),
         });
@@ -144,12 +146,17 @@ impl Proxy {
                 },
             };
             let _ = stream.set_nodelay(true);
-            let conn = Conn {
-                shared: shared.clone(),
-                client: peer,
-                tunnel: None,
-            };
-            tokio::spawn(serve_http(conn, TokioIo::new(stream)));
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let quiet = !shared.intercepts(peer).await;
+                let conn = Conn {
+                    shared,
+                    client: peer,
+                    tunnel: None,
+                    quiet,
+                };
+                serve_http(conn, TokioIo::new(stream)).await;
+            });
         }
     }
 }
@@ -176,6 +183,8 @@ struct Shared {
     config: ProxyConfig,
     ca: Arc<CertAuthority>,
     flows: FlowSender,
+    /// Has no receivers; flows from quiet connections go here and vanish.
+    muted: FlowSender,
     client: UpstreamClient,
     upgrade_client: UpstreamClient,
     next_id: AtomicU64,
@@ -183,16 +192,40 @@ struct Shared {
 }
 
 impl Shared {
-    fn exchange(&self, client: SocketAddr, kind: FlowKind, head: RequestHead<'_>) -> Arc<Exchange> {
+    fn exchange(
+        &self,
+        client: SocketAddr,
+        quiet: bool,
+        kind: FlowKind,
+        head: RequestHead<'_>,
+    ) -> Arc<Exchange> {
         let id: FlowId = self.next_id.fetch_add(1, Ordering::Relaxed);
-        Exchange::new(
-            id,
-            client,
-            kind,
-            head,
-            self.flows.clone(),
-            self.config.max_body_bytes,
-        )
+        let (flows, max_body) = if quiet {
+            (self.muted.clone(), 0)
+        } else {
+            (self.flows.clone(), self.config.max_body_bytes)
+        };
+        Exchange::new(id, client, kind, head, flows, max_body)
+    }
+
+    /// Whether to intercept and record a connection from `client`; see
+    /// [`ProxyConfig::intercept_processes`].
+    async fn intercepts(&self, client: SocketAddr) -> bool {
+        let wanted = &self.config.intercept_processes;
+        if wanted.is_empty() || !client.ip().is_loopback() {
+            return true;
+        }
+        match peer::client_process_path(client).await {
+            Some(path) => {
+                let hit = wanted.iter().any(|w| path.contains(w.as_str()));
+                debug!(%client, path, intercept = hit, "matched client process");
+                hit
+            }
+            None => {
+                debug!(%client, "could not tell which process connected; tunneling it untouched");
+                false
+            }
+        }
     }
 
     fn is_passthrough(&self, host: &str) -> bool {
@@ -214,6 +247,9 @@ struct Conn {
     shared: Arc<Shared>,
     client: SocketAddr,
     tunnel: Option<Arc<Tunnel>>,
+    /// Excluded by `intercept_processes`: tunnel CONNECTs untouched and
+    /// record nothing.
+    quiet: bool,
 }
 
 /// Serves HTTP/1.1 or h2 on `io`. Boxed because a CONNECT handled here serves
@@ -282,6 +318,7 @@ impl Conn {
     fn exchange(&self, kind: FlowKind, req: &Request<Incoming>, url: String) -> Arc<Exchange> {
         self.shared.exchange(
             self.client,
+            self.quiet,
             kind,
             RequestHead {
                 method: req.method().as_str(),
@@ -376,7 +413,7 @@ impl Conn {
             version: req.version(),
             headers: req.headers().clone(),
         };
-        if self.shared.is_passthrough(head.authority.host()) {
+        if self.quiet || self.shared.is_passthrough(head.authority.host()) {
             return tunnel::passthrough(self.clone(), req, head).await;
         }
         let conn = self.clone();

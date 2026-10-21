@@ -54,6 +54,7 @@ impl ConnectHead {
     fn exchange(&self, conn: &Conn, kind: FlowKind) -> Arc<Exchange> {
         conn.shared.exchange(
             conn.client,
+            conn.quiet,
             kind,
             RequestHead {
                 method: "CONNECT",

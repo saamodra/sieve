@@ -265,3 +265,32 @@ async fn sigint_stops_the_process_promptly() {
         daemon.output()
     );
 }
+
+/// `kill` and closing the terminal must shut down as cleanly as Ctrl+C, so
+/// device teardown (Mac proxy, Android http_proxy) still runs.
+async fn assert_clean_exit_on(signal: &str) {
+    let config = TempDir::new().unwrap();
+    let (_proxy, mut daemon) = start_sieve(&config, &[]).await;
+
+    let status = daemon.signal(signal, SHUTDOWN_TIMEOUT);
+    assert!(
+        status.success(),
+        "sieve exited with {status} after SIG{signal}:\n{}",
+        daemon.output()
+    );
+    assert!(
+        daemon.stderr().contains("shutting down"),
+        "{}",
+        daemon.output()
+    );
+}
+
+#[tokio::test]
+async fn sigterm_stops_the_process_cleanly() {
+    assert_clean_exit_on("TERM").await;
+}
+
+#[tokio::test]
+async fn sighup_stops_the_process_cleanly() {
+    assert_clean_exit_on("HUP").await;
+}
