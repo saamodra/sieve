@@ -3,10 +3,12 @@
 mod api;
 mod assets;
 mod auth;
+mod diff;
+mod har_import;
 mod model;
 mod store;
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicU64};
 
 use anyhow::{Context, Result, bail};
 use axum::{Router, middleware};
@@ -68,9 +70,14 @@ fn build(
         shutdown.clone(),
     ));
 
-    let mut app = api::router(ApiState { store, events })
-        .merge(extra_routes)
-        .fallback(assets::serve_asset);
+    let mut app = api::router(ApiState {
+        store,
+        events,
+        flows: flows.clone(),
+        next_id: Arc::new(AtomicU64::new(api::SYNTHETIC_ID_BASE)),
+    })
+    .merge(extra_routes)
+    .fallback(assets::serve_asset);
     if let (true, Some(token)) = (protect, token) {
         app = app.layer(middleware::from_fn_with_state(
             Arc::<str>::from(token),

@@ -9,6 +9,7 @@ mod capture;
 mod decode;
 mod io;
 mod peer;
+pub mod replay;
 mod tls;
 mod tunnel;
 
