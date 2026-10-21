@@ -190,14 +190,14 @@ This phase is done as needed; each part stands alone, so the order is free.
 
 **5a. Rules engine (rewrite + mock)**
 
-- [ ] Rule = matcher (host, path glob/regex, method, header) + action (modify headers, replace body, replace status, delay, mock response from file, block).
-- [ ] Store rules in a watched TOML/JSON file (`notify`), plus an editor in the UI.
-- [ ] Map Remote: point `api.prod.com` at `localhost:3000` to test a local backend.
+- [x] Rule = matcher (host, path glob/regex, method, header) + action (modify headers, replace body, replace status, delay, mock response from file, block).
+- [x] Store rules in a watched TOML/JSON file (`notify`), plus an editor in the UI.
+- [x] Map Remote: point `api.prod.com` at `localhost:3000` to test a local backend.
 
 **5b. Breakpoints**
 
-- [ ] Requests matching a breakpoint rule are held (using a `oneshot` channel); the UI shows an edit form, then Continue or Abort.
-- [ ] Default timeout of 60 seconds so the app never hangs forever.
+- [x] Requests matching a breakpoint rule are held (using a `oneshot` channel); the UI shows an edit form, then Continue or Abort.
+- [x] Default timeout of 60 seconds so the app never hangs forever.
 
 **5c. Frida for certificate pinning (your own apps or ones you may test)**
 

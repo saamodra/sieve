@@ -10,7 +10,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use axum::{Router, middleware};
-use sieve_core::{FlowSender, UiConfig};
+use sieve_core::{
+    FlowSender, UiConfig,
+    rules::{RuleEngine, breakpoint::BreakpointEvent},
+};
 use tokio::{net::TcpListener, sync::broadcast};
 use tokio_util::sync::CancellationToken;
 
@@ -31,7 +34,19 @@ pub async fn serve(
     extra_routes: Router,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let app = build(&config, &flows, extra_routes, &shutdown)?;
+    serve_with_rules(config, flows, extra_routes, shutdown, None).await
+}
+
+/// Like [`serve`], and with `rules` the UI can edit rules and answer
+/// breakpoints.
+pub async fn serve_with_rules(
+    config: UiConfig,
+    flows: FlowSender,
+    extra_routes: Router,
+    shutdown: CancellationToken,
+    rules: Option<Arc<RuleEngine>>,
+) -> Result<()> {
+    let app = build_with_rules(&config, &flows, extra_routes, &shutdown, rules)?;
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("binding the web UI to {}", config.listen))?;
@@ -43,11 +58,22 @@ pub async fn serve(
 }
 
 /// Builds the app and starts feeding the store from `flows`.
+#[cfg(test)]
 fn build(
     config: &UiConfig,
     flows: &FlowSender,
     extra_routes: Router,
     shutdown: &CancellationToken,
+) -> Result<Router> {
+    build_with_rules(config, flows, extra_routes, shutdown, None)
+}
+
+fn build_with_rules(
+    config: &UiConfig,
+    flows: &FlowSender,
+    extra_routes: Router,
+    shutdown: &CancellationToken,
+    rules: Option<Arc<RuleEngine>>,
 ) -> Result<Router> {
     let token = config.token.as_deref().filter(|t| !t.is_empty());
     let protect = !config.listen.ip().is_loopback();
@@ -68,9 +94,21 @@ fn build(
         shutdown.clone(),
     ));
 
-    let mut app = api::router(ApiState { store, events })
-        .merge(extra_routes)
-        .fallback(assets::serve_asset);
+    if let Some(engine) = &rules {
+        tokio::spawn(forward_breakpoints(
+            engine.breakpoints().subscribe(),
+            events.clone(),
+            shutdown.clone(),
+        ));
+    }
+
+    let mut app = api::router(ApiState {
+        store,
+        events,
+        rules,
+    })
+    .merge(extra_routes)
+    .fallback(assets::serve_asset);
     if let (true, Some(token)) = (protect, token) {
         app = app.layer(middleware::from_fn_with_state(
             Arc::<str>::from(token),
@@ -78,6 +116,28 @@ fn build(
         ));
     }
     Ok(app)
+}
+
+/// Relays breakpoint events to WebSocket subscribers.
+async fn forward_breakpoints(
+    mut rx: broadcast::Receiver<BreakpointEvent>,
+    events: broadcast::Sender<WsEvent>,
+    shutdown: CancellationToken,
+) {
+    loop {
+        let event = tokio::select! {
+            _ = shutdown.cancelled() => return,
+            r = rx.recv() => match r {
+                Ok(BreakpointEvent::Held { request }) => WsEvent::Breakpoint { request },
+                Ok(BreakpointEvent::Released { id, outcome }) => {
+                    WsEvent::BreakpointReleased { id, outcome }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => WsEvent::Resync,
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+        };
+        let _ = events.send(event);
+    }
 }
 
 /// Copies flows from the proxy channel into the store, then announces them.
@@ -107,5 +167,7 @@ async fn ingest(
     }
 }
 
+#[cfg(test)]
+mod rules_tests;
 #[cfg(test)]
 mod tests;

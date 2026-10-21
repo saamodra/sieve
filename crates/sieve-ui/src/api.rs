@@ -10,11 +10,14 @@ use axum::{
     },
     http::{StatusCode, header},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sieve_core::flow::FlowId;
+use sieve_core::{
+    flow::FlowId,
+    rules::{Decision, HeldRequest, RequestEdit, Rule, RuleEngine, breakpoint::Outcome},
+};
 use tokio::sync::broadcast;
 
 use crate::{
@@ -35,12 +38,17 @@ pub enum WsEvent {
     Clear,
     /// The subscriber missed events; refetch the list.
     Resync,
+    /// A request is held at a breakpoint.
+    Breakpoint { request: HeldRequest },
+    /// A held request continued, was aborted, or timed out.
+    BreakpointReleased { id: FlowId, outcome: Outcome },
 }
 
 #[derive(Clone)]
 pub struct ApiState {
     pub store: Arc<FlowStore>,
     pub events: broadcast::Sender<WsEvent>,
+    pub rules: Option<Arc<RuleEngine>>,
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -49,6 +57,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/flows/{id}", get(get_flow))
         .route("/api/flows/{id}/har", get(flow_har))
         .route("/api/flows/{id}/curl", get(flow_curl))
+        .route("/api/rules", get(get_rules).put(put_rules))
+        .route("/api/breakpoints", get(list_breakpoints))
+        .route("/api/breakpoints/{id}/continue", post(continue_breakpoint))
+        .route("/api/breakpoints/{id}/abort", post(abort_breakpoint))
         .route("/api/ws", get(ws))
         .route("/api/{*rest}", get(api_not_found))
         .with_state(state)
@@ -125,6 +137,78 @@ async fn flow_curl(State(st): State<ApiState>, Path(id): Path<FlowId>) -> Respon
             .into_response(),
         None => not_found(id),
     }
+}
+
+fn rules_disabled() -> Response {
+    let body = json!({"error": "rules are not enabled in this session"});
+    (StatusCode::NOT_FOUND, Json(body)).into_response()
+}
+
+async fn get_rules(State(st): State<ApiState>) -> Response {
+    let Some(engine) = &st.rules else {
+        return rules_disabled();
+    };
+    Json(json!({
+        "rules": engine.rules(),
+        "path": engine.path().map(|p| p.display().to_string()),
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct RulesBody {
+    rules: Vec<Rule>,
+}
+
+async fn put_rules(State(st): State<ApiState>, Json(body): Json<RulesBody>) -> Response {
+    let Some(engine) = &st.rules else {
+        return rules_disabled();
+    };
+    match engine.replace(body.rules) {
+        Ok(()) => Json(json!({"rules": engine.rules()})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("{e:#}")})),
+        )
+            .into_response(),
+    }
+}
+
+async fn list_breakpoints(State(st): State<ApiState>) -> Response {
+    let Some(engine) = &st.rules else {
+        return rules_disabled();
+    };
+    let breakpoints = engine.breakpoints();
+    Json(json!({
+        "held": breakpoints.pending(),
+        "timeout_secs": breakpoints.timeout().as_secs(),
+    }))
+    .into_response()
+}
+
+fn resolve(st: &ApiState, id: FlowId, decision: Decision) -> Response {
+    let Some(engine) = &st.rules else {
+        return rules_disabled();
+    };
+    if engine.breakpoints().resolve(id, decision) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        let body = json!({"error": format!("request {id} is not held (it may have timed out)")});
+        (StatusCode::NOT_FOUND, Json(body)).into_response()
+    }
+}
+
+async fn continue_breakpoint(
+    State(st): State<ApiState>,
+    Path(id): Path<FlowId>,
+    edit: Option<Json<RequestEdit>>,
+) -> Response {
+    let edit = edit.map(|Json(e)| e).unwrap_or_default();
+    resolve(&st, id, Decision::Continue(edit))
+}
+
+async fn abort_breakpoint(State(st): State<ApiState>, Path(id): Path<FlowId>) -> Response {
+    resolve(&st, id, Decision::Abort)
 }
 
 async fn ws(State(st): State<ApiState>, upgrade: WebSocketUpgrade) -> Response {
