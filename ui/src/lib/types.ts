@@ -50,4 +50,56 @@ export interface FlowDetail {
 export type WsEvent =
   | { type: 'flow'; flow: FlowSummary }
   | { type: 'clear' }
-  | { type: 'resync' };
+  | { type: 'resync' }
+  | { type: 'breakpoint'; request: HeldRequest }
+  | { type: 'breakpoint_released'; id: number; outcome: string };
+
+export interface Mock {
+  status: number;
+  headers: Record<string, string>;
+  body: string | null;
+  body_file: string | null;
+}
+
+export interface Rule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  match: {
+    host: string | null;
+    path: string | null;
+    path_regex: string | null;
+    method: string | null;
+    header: { name: string; value: string | null } | null;
+  };
+  action: {
+    block: boolean;
+    mock: Mock | null;
+    map_remote: string | null;
+    set_request_headers: Record<string, string>;
+    remove_request_headers: string[];
+    set_response_headers: Record<string, string>;
+    remove_response_headers: string[];
+    response_status: number | null;
+    response_body: string | null;
+    delay_ms: number | null;
+    breakpoint: boolean;
+  };
+}
+
+export interface HeldRequest {
+  id: number;
+  method: string;
+  url: string;
+  headers: Headers;
+  body: string | null;
+  body_size: number;
+  timeout_secs: number;
+}
+
+export interface RequestEdit {
+  method: string;
+  url: string;
+  headers: Headers;
+  body?: string;
+}

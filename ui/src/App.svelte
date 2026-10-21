@@ -3,6 +3,8 @@
   import { Capture } from './lib/capture.svelte';
   import FlowTable from './lib/FlowTable.svelte';
   import DetailPanel from './lib/DetailPanel.svelte';
+  import RulesPanel from './lib/RulesPanel.svelte';
+  import BreakpointsPanel from './lib/BreakpointsPanel.svelte';
 
   const capture = new Capture();
   onMount(() => capture.start());
@@ -13,6 +15,19 @@
   let status = $state('');
   let client = $state('');
   let selectedId = $state<number | null>(null);
+  let showRules = $state(false);
+  let showHeld = $state(false);
+  let seenHeld = 0;
+
+  // Open the breakpoint panel when a request gets held.
+  $effect(() => {
+    const n = capture.held.length;
+    if (n > seenHeld) {
+      showHeld = true;
+      showRules = false;
+    }
+    seenHeld = n;
+  });
   let detailWidth = $state(Math.round(window.innerWidth * 0.45));
 
   const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD', 'CONNECT'];
@@ -97,6 +112,10 @@
     <button class:active={capture.paused} onclick={() => capture.setPaused(!capture.paused)}>
       {capture.paused ? `Resume${capture.pendingCount ? ` (${capture.pendingCount})` : ''}` : 'Pause'}
     </button>
+    <button class:active={capture.held.length > 0} onclick={() => ((showHeld = !showHeld), (showRules = false))}>
+      Breakpoints{capture.held.length ? ` (${capture.held.length})` : ''}
+    </button>
+    <button onclick={() => ((showRules = !showRules), (showHeld = false))}>Rules</button>
     <button onclick={clear}>Clear</button>
     <span class="dot" class:on={capture.connected} title={capture.connected ? 'Live' : 'Disconnected'}></span>
   </header>
@@ -118,6 +137,8 @@
       </section>
     {/if}
   </main>
+  {#if showRules}<RulesPanel onclose={() => (showRules = false)} />{/if}
+  {#if showHeld}<BreakpointsPanel held={capture.held} onclose={() => (showHeld = false)} />{/if}
 </div>
 
 <style>

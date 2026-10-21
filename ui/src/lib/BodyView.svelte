@@ -1,5 +1,6 @@
 <script lang="ts">
   import { decodeBase64, formatSize, hexDump, prettyJson } from './format';
+  import JsonTree from './JsonTree.svelte';
   import type { BodyDetail } from './types';
 
   let { body }: { body: BodyDetail } = $props();
@@ -8,6 +9,16 @@
 
   const isImage = $derived((body.content_type ?? '').toLowerCase().startsWith('image/'));
   const pretty = $derived(body.text !== null ? prettyJson(body.text) : null);
+  const parsed = $derived.by(() => {
+    if (pretty === null || body.text === null) return null;
+    try {
+      return { value: JSON.parse(body.text) as unknown };
+    } catch {
+      return null;
+    }
+  });
+  let signal = $state({ n: 0, all: true });
+  const fold = (all: boolean) => (signal = { n: signal.n + 1, all });
   const modes = $derived.by(() => {
     const m: [Mode, string][] = [];
     if (isImage) m.push(['image', 'Image']);
@@ -33,6 +44,12 @@
         <button class:on={mode === k} onclick={() => (chosen = k)}>{label}</button>
       {/each}
     </div>
+    {#if mode === 'pretty' && parsed}
+      <div class="modes">
+        <button onclick={() => fold(true)}>Expand all</button>
+        <button onclick={() => fold(false)}>Collapse all</button>
+      </div>
+    {/if}
     <span class="meta">
       {body.content_type ?? 'unknown type'} · {formatSize(body.size)}
       {#if body.content_encoding}· {body.content_encoding}{/if}
@@ -41,6 +58,8 @@
   </div>
   {#if mode === 'image'}
     <div class="img"><img src={imageSrc} alt="Response body preview" /></div>
+  {:else if mode === 'pretty' && parsed}
+    <div class="tree"><JsonTree value={parsed.value} {signal} /></div>
   {:else if mode === 'pretty'}
     <pre>{pretty}</pre>
   {:else if mode === 'raw'}
@@ -55,7 +74,6 @@
     position: sticky;
     top: 0;
     display: flex;
-    justify-content: space-between;
     align-items: center;
     gap: 8px;
     padding: 5px 10px;
@@ -75,6 +93,7 @@
     color: #fff;
   }
   .meta {
+    margin-left: auto;
     color: var(--fg-dim);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -86,6 +105,9 @@
     font: 12px/1.45 var(--mono);
     white-space: pre-wrap;
     word-break: break-all;
+  }
+  .tree {
+    padding: 8px 10px 8px calc(10px + 1.2em);
   }
   .img {
     padding: 12px;

@@ -3,7 +3,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context as _, Result};
-use sieve_core::{CertAuthority, Config, Paths, flow, proxy};
+use sieve_core::{CertAuthority, Config, Paths, flow, proxy, rules::RuleEngine};
 use sieve_device::ios_device::{self, SetupContext};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -58,19 +58,39 @@ pub async fn run_session(
         flows: flows.clone(),
     });
 
+    let rules = RuleEngine::new(Some(ctx.paths.rules_file()));
+    if let Err(e) = rules.reload() {
+        warn!("ignoring the rules file: {e:#}");
+    }
+    // Held for the session: dropping the watcher stops live reloads.
+    let _rules_watcher = match rules.watch() {
+        Ok(watcher) => Some(watcher),
+        Err(e) => {
+            warn!("not watching the rules file for changes: {e:#}");
+            None
+        }
+    };
+
     info!(
         proxy = %ctx.config.proxy.listen,
         ui = %format!("http://{}", ctx.config.ui.listen),
         "sieve running",
     );
     let result = tokio::try_join!(
-        proxy::run(
+        proxy::run_with_rules(
             ctx.config.proxy.clone(),
             ca,
             flows.clone(),
-            shutdown.clone()
+            shutdown.clone(),
+            Some(rules.clone()),
         ),
-        sieve_ui::serve(ctx.config.ui.clone(), flows, setup_routes, shutdown.clone()),
+        sieve_ui::serve_with_rules(
+            ctx.config.ui.clone(),
+            flows,
+            setup_routes,
+            shutdown.clone(),
+            Some(rules),
+        ),
     );
     shutdown.cancel();
     result.map(|_| ())
