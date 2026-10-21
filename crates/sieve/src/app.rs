@@ -80,6 +80,8 @@ pub async fn run_session(
         Err(e) => warn!("ignoring the scripts directory: {e:#}"),
     }
     let scripts = Arc::new(scripts);
+    let replayer = proxy::replay::Replayer::from_config(&ctx.config.proxy)
+        .context("preparing the replay client")?;
 
     info!(
         proxy = %ctx.config.proxy.listen,
@@ -95,12 +97,13 @@ pub async fn run_session(
             Some(rules.clone()),
             Some(scripts),
         ),
-        sieve_ui::serve_with_rules(
+        sieve_ui::serve_with_replayer(
             ctx.config.ui.clone(),
             flows,
             setup_routes,
             shutdown.clone(),
             Some(rules),
+            replayer,
         ),
     );
     shutdown.cancel();

@@ -14,6 +14,8 @@ use anyhow::{Context, Result, bail};
 use axum::{Router, middleware};
 use sieve_core::{
     FlowSender, UiConfig,
+    config::DEFAULT_MAX_BODY_BYTES,
+    proxy::replay::Replayer,
     rules::{RuleEngine, breakpoint::BreakpointEvent},
 };
 use tokio::{net::TcpListener, sync::broadcast};
@@ -48,7 +50,21 @@ pub async fn serve_with_rules(
     shutdown: CancellationToken,
     rules: Option<Arc<RuleEngine>>,
 ) -> Result<()> {
-    let app = build_with_rules(&config, &flows, extra_routes, &shutdown, rules)?;
+    let replayer = Replayer::new(&[], DEFAULT_MAX_BODY_BYTES)?;
+    serve_with_replayer(config, flows, extra_routes, shutdown, rules, replayer).await
+}
+
+/// Like [`serve_with_rules`], replaying requests with `replayer`, so replays
+/// trust the proxy's extra upstream roots and honour its body limit.
+pub async fn serve_with_replayer(
+    config: UiConfig,
+    flows: FlowSender,
+    extra_routes: Router,
+    shutdown: CancellationToken,
+    rules: Option<Arc<RuleEngine>>,
+    replayer: Replayer,
+) -> Result<()> {
+    let app = build_with_replayer(&config, &flows, extra_routes, &shutdown, rules, replayer)?;
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("binding the web UI to {}", config.listen))?;
@@ -70,12 +86,25 @@ fn build(
     build_with_rules(config, flows, extra_routes, shutdown, None)
 }
 
+#[cfg(test)]
 fn build_with_rules(
     config: &UiConfig,
     flows: &FlowSender,
     extra_routes: Router,
     shutdown: &CancellationToken,
     rules: Option<Arc<RuleEngine>>,
+) -> Result<Router> {
+    let replayer = Replayer::new(&[], DEFAULT_MAX_BODY_BYTES)?;
+    build_with_replayer(config, flows, extra_routes, shutdown, rules, replayer)
+}
+
+fn build_with_replayer(
+    config: &UiConfig,
+    flows: &FlowSender,
+    extra_routes: Router,
+    shutdown: &CancellationToken,
+    rules: Option<Arc<RuleEngine>>,
+    replayer: Replayer,
 ) -> Result<Router> {
     let token = config.token.as_deref().filter(|t| !t.is_empty());
     let protect = !config.listen.ip().is_loopback();
@@ -108,6 +137,7 @@ fn build_with_rules(
         store,
         events,
         rules,
+        replayer,
         flows: flows.clone(),
         next_id: Arc::new(AtomicU64::new(api::SYNTHETIC_ID_BASE)),
     })
