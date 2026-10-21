@@ -28,6 +28,14 @@
 //! when the script changed them. `req.respond = #{ status, headers, body }`
 //! answers the request without contacting the server.
 //!
+//! Hooks see whole bodies, so the proxy reads a body into memory before
+//! running them, but never more than `max_body_bytes` of it. A larger body,
+//! or one with trailers, streams through untouched and skips its hook:
+//! `on_request` does not run for that request (`on_response` then sees an
+//! empty `req.body`), and `on_response` does not run for that response.
+//! `text/event-stream` responses are never buffered, so server-sent events
+//! never reach `on_response`.
+//!
 //! Hook point: the proxy does not call this module yet. The rules engine
 //! (phase 5a) should run [`ScriptEngine::on_request`] before forwarding a
 //! request, and [`ScriptEngine::on_response`] on the upstream response before

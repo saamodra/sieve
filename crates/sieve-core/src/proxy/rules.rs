@@ -1,19 +1,26 @@
 //! Applies [`crate::rules`] to proxied requests: block, mock, map remote,
 //! header and body rewrites, delays, and breakpoints.
 
-use std::{path::Path, sync::Arc};
+use std::{
+    collections::VecDeque,
+    path::Path,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http::{
     HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri, Version,
     header, request::Parts, response,
 };
+use http_body::{Body as HttpBody, Frame, SizeHint};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use tracing::warn;
 
 use super::{
-    Conn, ProxyBody,
+    BoxError, Conn, ProxyBody,
     capture::{CaptureBody, Exchange, Side},
     decode::decode_all,
     strip_hop_by_hop, text_response, upstream_failed,
@@ -317,7 +324,8 @@ pub(super) fn edit_response(parts: &mut response::Parts, plan: &Plan) -> Option<
 }
 
 /// Runs `scripts` (rhai plugins, phase 5e) against a request that no
-/// declarative rule already answered, then forwards it.
+/// declarative rule already answered, then forwards it. Hooks only see bodies
+/// of at most `max_body_bytes`; larger ones stream through untouched.
 pub(super) async fn forward_with_scripts(
     conn: &Conn,
     mut parts: Parts,
@@ -326,8 +334,43 @@ pub(super) async fn forward_with_scripts(
     client_version: Version,
     scripts: Arc<ScriptEngine>,
 ) -> Response<ProxyBody> {
-    let mut bytes = match body.collect().await {
-        Ok(collected) => collected.to_bytes(),
+    let limit = exchange.max_body();
+    let (out_body, freq) = match buffer(body, limit).await {
+        Ok(Buffered::Whole(mut bytes)) => {
+            let mut freq =
+                flow_request_from(&parts, script_body(&parts.headers, &bytes, limit).await);
+            if freq.body.decoded.is_some() {
+                let outcome = match scripts.on_request(&mut freq) {
+                    Ok(outcome) => outcome,
+                    Err(e) => {
+                        warn!("script on_request failed, forwarding the request unmodified: {e:#}");
+                        RequestOutcome::Forward
+                    }
+                };
+                if let RequestOutcome::Respond(fres) = outcome {
+                    let _ = CaptureBody::new(Full::new(bytes), Side::Request, exchange.clone())
+                        .collect()
+                        .await;
+                    return script_response(&fres, exchange, client_version);
+                }
+                apply_flow_request(&freq, &mut parts, &mut bytes);
+                exchange.update_request(
+                    parts.method.as_str(),
+                    parts.uri.to_string(),
+                    &parts.headers,
+                );
+            } else {
+                // `on_response` gets an empty body rather than undecodable bytes.
+                freq.body = flow::Body::default();
+            }
+            let body = CaptureBody::new(Full::new(bytes), Side::Request, exchange.clone());
+            (body.boxed_unsync(), freq)
+        }
+        Ok(Buffered::Stream(body)) => {
+            let body = CaptureBody::new(body, Side::Request, exchange.clone());
+            let freq = flow_request_from(&parts, flow::Body::default());
+            (body.boxed_unsync(), freq)
+        }
         Err(e) => {
             let message = format!("reading the request body failed: {e}");
             exchange.finish(None, Some(message.clone()));
@@ -335,28 +378,6 @@ pub(super) async fn forward_with_scripts(
         }
     };
 
-    let limit = exchange.max_body();
-    let mut freq = flow_request_from(&parts, script_body(&parts.headers, &bytes, limit).await);
-    if freq.body.decoded.is_some() {
-        let outcome = match scripts.on_request(&mut freq) {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                warn!("script on_request failed, forwarding the request unmodified: {e:#}");
-                RequestOutcome::Forward
-            }
-        };
-        if let RequestOutcome::Respond(fres) = outcome {
-            let _ = CaptureBody::new(Full::new(bytes), Side::Request, exchange.clone())
-                .collect()
-                .await;
-            return script_response(&fres, exchange, client_version);
-        }
-        apply_flow_request(&freq, &mut parts, &mut bytes);
-        exchange.update_request(parts.method.as_str(), parts.uri.to_string(), &parts.headers);
-    }
-
-    let out_body =
-        CaptureBody::new(Full::new(bytes), Side::Request, exchange.clone()).boxed_unsync();
     let res = match conn
         .shared
         .client
@@ -367,13 +388,16 @@ pub(super) async fn forward_with_scripts(
         Err(e) => return upstream_failed(&exchange, &e),
     };
 
-    if !scripts.has_on_response() {
+    if !scripts.has_on_response() || is_event_stream(res.headers()) {
         return super::respond(res, exchange, client_version, None);
     }
 
     let (mut res_parts, res_body) = res.into_parts();
-    let mut res_bytes = match res_body.collect().await {
-        Ok(collected) => collected.to_bytes(),
+    let mut res_bytes = match buffer(res_body, limit).await {
+        Ok(Buffered::Whole(bytes)) => bytes,
+        Ok(Buffered::Stream(body)) => {
+            return pass_response(res_parts, body, exchange, client_version);
+        }
         Err(e) => {
             let message = format!("reading the response body failed: {e}");
             exchange.finish(None, Some(message.clone()));
@@ -388,15 +412,117 @@ pub(super) async fn forward_with_scripts(
         }
         apply_flow_response(&fres, &mut res_parts, &mut res_bytes);
     }
-    exchange.set_response(
-        res_parts.status.as_u16(),
-        res_parts.version,
-        &res_parts.headers,
-    );
-    strip_hop_by_hop(&mut res_parts.headers, false);
-    res_parts.version = client_version;
-    let out_body = CaptureBody::new(Full::new(res_bytes), Side::Response, exchange).boxed_unsync();
-    Response::from_parts(res_parts, out_body)
+    pass_response(res_parts, Full::new(res_bytes), exchange, client_version)
+}
+
+/// Passes an upstream response to the client after the `on_response` hooks.
+fn pass_response<B>(
+    mut parts: response::Parts,
+    body: B,
+    exchange: Arc<Exchange>,
+    client_version: Version,
+) -> Response<ProxyBody>
+where
+    B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Into<BoxError>,
+{
+    exchange.set_response(parts.status.as_u16(), parts.version, &parts.headers);
+    strip_hop_by_hop(&mut parts.headers, false);
+    parts.version = client_version;
+    let body = CaptureBody::new(body, Side::Response, exchange).boxed_unsync();
+    Response::from_parts(parts, body)
+}
+
+/// Server-sent events never end on their own, so they are never buffered.
+fn is_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
+}
+
+/// A body read ahead for a script hook.
+enum Buffered<B> {
+    /// The whole body, at most the limit.
+    Whole(Bytes),
+    /// A body to forward as is, because it outgrew the limit or carries
+    /// trailers: what was read, then the rest.
+    Stream(Replay<B>),
+}
+
+/// Reads `body` into memory if it is at most `limit` bytes.
+async fn buffer<B>(mut body: B, limit: usize) -> Result<Buffered<B>, B::Error>
+where
+    B: HttpBody<Data = Bytes> + Unpin,
+{
+    let mut read = VecDeque::<Frame<Bytes>>::new();
+    // A declared length over the limit needs no reading to rule out.
+    if body.size_hint().lower() <= limit as u64 {
+        let mut len = 0;
+        loop {
+            let Some(frame) = body.frame().await else {
+                let mut bytes = BytesMut::with_capacity(len);
+                for data in read.iter().filter_map(Frame::data_ref) {
+                    bytes.extend_from_slice(data);
+                }
+                return Ok(Buffered::Whole(bytes.freeze()));
+            };
+            let frame = frame?;
+            len += frame.data_ref().map_or(0, Bytes::len);
+            let fits = frame.is_data() && len <= limit;
+            read.push_back(frame);
+            if !fits {
+                break;
+            }
+        }
+    }
+    Ok(Buffered::Stream(Replay { read, rest: body }))
+}
+
+/// Plays back the frames [`buffer`] read, then the rest of the body.
+struct Replay<B> {
+    read: VecDeque<Frame<Bytes>>,
+    rest: B,
+}
+
+impl<B> HttpBody for Replay<B>
+where
+    B: HttpBody<Data = Bytes> + Unpin,
+{
+    type Data = Bytes;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, B::Error>>> {
+        let this = self.get_mut();
+        match this.read.pop_front() {
+            Some(frame) => Poll::Ready(Some(Ok(frame))),
+            None => Pin::new(&mut this.rest).poll_frame(cx),
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.read.is_empty() && self.rest.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        let read: u64 = self
+            .read
+            .iter()
+            .filter_map(Frame::data_ref)
+            .map(|d| d.len() as u64)
+            .sum();
+        let rest = self.rest.size_hint();
+        let mut hint = SizeHint::new();
+        hint.set_lower(rest.lower() + read);
+        if let Some(upper) = rest.upper() {
+            hint.set_upper(upper + read);
+        }
+        hint
+    }
 }
 
 /// The body a script sees: `raw` as sent on the wire, plus `decoded` with any
@@ -537,6 +663,32 @@ mod tests {
             "https://staging.test/base/v1/users?id=3"
         );
         assert!(remap(&uri, "not a host").is_none());
+    }
+
+    #[tokio::test]
+    async fn buffer_keeps_small_bodies_and_passes_the_rest_on_whole() {
+        let body = Full::new(Bytes::from_static(b"abc"));
+        let Buffered::Whole(bytes) = buffer(body, 3).await.unwrap() else {
+            panic!("a body at the limit is buffered");
+        };
+        assert_eq!(bytes, "abc");
+
+        let body = Full::new(Bytes::from_static(b"abcd"));
+        let Buffered::Stream(body) = buffer(body, 3).await.unwrap() else {
+            panic!("a body over the limit is streamed");
+        };
+        assert_eq!(body.collect().await.unwrap().to_bytes(), "abcd");
+
+        let mut trailers = HeaderMap::new();
+        trailers.insert("grpc-status", HeaderValue::from_static("0"));
+        let body = Full::new(Bytes::from_static(b"ab"))
+            .with_trailers(std::future::ready(Some(Ok(trailers))));
+        let Buffered::Stream(body) = buffer(body, 3).await.unwrap() else {
+            panic!("a body with trailers is streamed");
+        };
+        let collected = body.collect().await.unwrap();
+        assert_eq!(collected.trailers().unwrap()["grpc-status"], "0");
+        assert_eq!(collected.to_bytes(), "ab");
     }
 
     #[test]
