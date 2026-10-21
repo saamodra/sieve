@@ -1,6 +1,8 @@
+use std::path::PathBuf;
+
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
-use sieve_device::android::{Adb, mode1, system_ca};
+use sieve_device::android::{Adb, frida, mode1, system_ca, vpn};
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{Context, ensure_port_free, run_session};
@@ -26,6 +28,19 @@ enum AndroidCommand {
     Health,
     /// Inject the CA into the system store (mode 2, emulator or root).
     InjectCa,
+    /// Push and start frida-server (needs root), then spawn <package> with
+    /// sieve's certificate-pinning unpinning script attached.
+    Frida {
+        /// Package id of the app to spawn.
+        package: String,
+        /// Path to a frida-server binary for the device's ABI, downloaded
+        /// from https://github.com/frida/frida/releases. Its version must
+        /// match the `frida` CLI installed on this machine.
+        #[arg(long)]
+        frida_server: PathBuf,
+    },
+    /// Route all TCP through sieve with the VPN companion app, and run the proxy.
+    Vpn,
 }
 
 pub async fn run(ctx: Context, args: AndroidArgs) -> Result<()> {
@@ -75,6 +90,32 @@ pub async fn run(ctx: Context, args: AndroidArgs) -> Result<()> {
         AndroidCommand::InjectCa => {
             let ca = ctx.load_ca()?;
             system_ca::inject(&adb, serial, ca.cert_pem(), &ca.subject_hash_old()?).await
+        }
+        AndroidCommand::Frida {
+            package,
+            frida_server,
+        } => {
+            let device = mode1::select_device(&adb, serial).await?;
+            let host = frida::FridaCli::default();
+            frida::run(&adb, &host, Some(&device), &package, &frida_server).await
+        }
+        AndroidCommand::Vpn => {
+            ensure_port_free(ctx.config.proxy.listen)?;
+            ensure_port_free(ctx.config.ui.listen)?;
+            let device = mode1::select_device(&adb, serial).await?;
+            let ca = ctx.load_ca()?;
+            vpn::setup(&adb, &device, port, ca.cert_pem()).await?;
+            println!("Device {device} can reach the proxy at 127.0.0.1:{port}.\n");
+            match vpn::launch(&adb, &device, port).await {
+                Ok(()) => println!("Opened the sieve VPN app on the device.\n"),
+                Err(e) => println!(
+                    "Could not open the VPN app ({e:#}). Install android-vpn/ first; see its README.\n"
+                ),
+            }
+            println!("{}\n", vpn::install_steps());
+            let result = run_session(&ctx, ca, CancellationToken::new()).await;
+            let cleanup = vpn::teardown(&adb, &device, port).await;
+            result.and(cleanup)
         }
     }
 }

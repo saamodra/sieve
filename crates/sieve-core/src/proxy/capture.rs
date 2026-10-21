@@ -86,10 +86,28 @@ impl Exchange {
         })
     }
 
+    pub(crate) fn id(&self) -> FlowId {
+        self.lock().flow.id
+    }
+
     /// Publishes the flow as it stands, before the response arrives.
     pub(crate) fn emit_start(&self) {
         let flow = self.lock().flow.clone();
         let _ = self.flows.send(Arc::new(flow));
+    }
+
+    /// Replaces the recorded request head after a rule or breakpoint changed
+    /// what is sent, and publishes the flow again.
+    pub(crate) fn update_request(&self, method: &str, url: String, headers: &HeaderMap) {
+        {
+            let mut state = self.lock();
+            let request = &mut state.flow.request;
+            request.method = method.to_string();
+            request.url = url;
+            request.headers = header_pairs(headers);
+            request.body = body_meta(headers);
+        }
+        self.emit_start();
     }
 
     pub(crate) fn set_response(&self, status: u16, version: Version, headers: &HeaderMap) {

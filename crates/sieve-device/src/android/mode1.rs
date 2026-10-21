@@ -116,7 +116,7 @@ fn proxy_value(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
-fn tcp(port: u16) -> String {
+pub(super) fn tcp(port: u16) -> String {
     format!("tcp:{port}")
 }
 
@@ -290,7 +290,11 @@ async fn apply<B: AndroidBridge>(bridge: &B, serial: &str, port: u16, ca_pem: &s
     push_ca(bridge, serial, ca_pem).await
 }
 
-async fn push_ca<B: AndroidBridge>(bridge: &B, serial: &str, ca_pem: &str) -> Result<()> {
+pub(super) async fn push_ca<B: AndroidBridge>(
+    bridge: &B,
+    serial: &str,
+    ca_pem: &str,
+) -> Result<()> {
     let local: PathBuf =
         std::env::temp_dir().join(format!("sieve-ca-{}.crt", uuid::Uuid::new_v4()));
     tokio::fs::write(&local, ca_pem)

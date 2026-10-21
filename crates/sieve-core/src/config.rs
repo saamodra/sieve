@@ -49,6 +49,18 @@ impl Paths {
         self.config_dir.join("config.toml")
     }
 
+    /// The watched rules file: `rules.json` if it exists and `rules.toml`
+    /// does not, otherwise `rules.toml`.
+    pub fn rules_file(&self) -> PathBuf {
+        let toml = self.config_dir.join(crate::rules::DEFAULT_FILE_NAME);
+        let json = self.config_dir.join("rules.json");
+        if !toml.exists() && json.exists() {
+            json
+        } else {
+            toml
+        }
+    }
+
     pub fn ca_cert(&self) -> PathBuf {
         self.config_dir.join("ca.pem")
     }
@@ -61,6 +73,11 @@ impl Paths {
     /// (e.g. the Mac's previous proxy settings).
     pub fn state_dir(&self) -> PathBuf {
         self.config_dir.join("state")
+    }
+
+    /// Directory of `*.rhai` scripting plugins, loaded at startup.
+    pub fn scripts_dir(&self) -> PathBuf {
+        self.config_dir.join("scripts")
     }
 }
 

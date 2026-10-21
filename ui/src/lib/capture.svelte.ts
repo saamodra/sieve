@@ -1,5 +1,5 @@
-import { fetchAllFlows, clearFlows, wsUrl } from './api';
-import type { FlowSummary, WsEvent } from './types';
+import { fetchAllFlows, fetchHeld, clearFlows, wsUrl } from './api';
+import type { FlowSummary, HeldRequest, WsEvent } from './types';
 
 /** A summary plus precomputed fields for fast filtering and rendering. */
 export interface Row extends FlowSummary {
@@ -30,6 +30,8 @@ export class Capture {
   pendingCount = $state(0);
   connected = $state(false);
   clients = $state<string[]>([]);
+  /** Requests held at a breakpoint, waiting for Continue or Abort. */
+  held = $state<HeldRequest[]>([]);
 
   #index = new Map<number, number>();
   #clientSet = new Set<string>();
@@ -70,6 +72,7 @@ export class Capture {
       const all = await fetchAllFlows();
       this.#push({ type: 'clear' });
       for (const flow of all) this.#push({ type: 'flow', flow });
+      this.held = await fetchHeld().catch(() => []);
     } catch (e) {
       console.error('loading flows failed', e);
     }
@@ -78,6 +81,14 @@ export class Capture {
   #push(ev: WsEvent) {
     if (ev.type === 'resync') {
       void this.#reload();
+      return;
+    }
+    if (ev.type === 'breakpoint') {
+      this.held = [...this.held.filter((h) => h.id !== ev.request.id), ev.request];
+      return;
+    }
+    if (ev.type === 'breakpoint_released') {
+      this.held = this.held.filter((h) => h.id !== ev.id);
       return;
     }
     if (this.paused && ev.type === 'flow') {

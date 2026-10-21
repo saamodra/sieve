@@ -423,3 +423,5 @@ async fn websocket_streams_summaries() {
     assert_eq!(v["type"], "clear");
     h.shutdown.cancel();
 }
+
+mod extra;

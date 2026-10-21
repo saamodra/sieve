@@ -28,11 +28,21 @@ on this device. Emulator images labelled \"Google Play\" can't `adb root`; use o
 
 /// How the script gets root on the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RootMethod {
+pub(super) enum RootMethod {
     /// adbd itself runs as root (`adb root`), so `adb shell` is root.
     AdbRoot,
     /// adbd is unprivileged, but `su -c` works.
     Su,
+}
+
+impl RootMethod {
+    /// Wraps a shell command so it runs as root on the device.
+    pub(super) fn wrap(self, command: &str) -> String {
+        match self {
+            RootMethod::AdbRoot => command.to_string(),
+            RootMethod::Su => format!("su -c '{command}'"),
+        }
+    }
 }
 
 /// Injects `ca_pem` as `<subject_hash_old>.0` into the device's system CA
@@ -72,10 +82,7 @@ pub async fn inject<B: AndroidBridge>(
     .await?;
 
     let run = format!("sh {REMOTE_SCRIPT} {remote_cert}");
-    let command = match root {
-        RootMethod::AdbRoot => run,
-        RootMethod::Su => format!("su -c '{run}'"),
-    };
+    let command = root.wrap(&run);
     let result = bridge.shell(serial, &command).await;
     // Best effort: the files are harmless if they stay behind.
     let _ = bridge
@@ -94,7 +101,10 @@ pub async fn inject<B: AndroidBridge>(
 
 /// Prefers `adb root` (Google APIs emulator images), then `su -c` (rooted
 /// devices). Fails with [`NO_ROOT`] if neither gives uid 0.
-async fn acquire_root<B: AndroidBridge>(bridge: &B, serial: Option<&str>) -> Result<RootMethod> {
+pub(super) async fn acquire_root<B: AndroidBridge>(
+    bridge: &B,
+    serial: Option<&str>,
+) -> Result<RootMethod> {
     // Also surfaces "no device" errors before we blame root.
     if is_root(&bridge.shell(serial, "id -u").await?) {
         return Ok(RootMethod::AdbRoot);

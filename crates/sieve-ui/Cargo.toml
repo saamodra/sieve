@@ -26,5 +26,6 @@ workspace = true
 
 [dev-dependencies]
 futures-util = "0.3.34"
+tempfile = "3.27.0"
 tokio-tungstenite = "0.30.0"
 tower = { version = "0.5.3", features = ["util"] }

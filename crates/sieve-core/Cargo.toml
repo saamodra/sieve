@@ -16,6 +16,7 @@ time.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
+rhai = { version = "1.26.1", features = ["sync"] }
 tracing.workspace = true
 
 async-compression = { version = "0.4.51", features = ["tokio", "gzip", "zlib", "deflate", "brotli", "zstd"] }
@@ -34,6 +35,9 @@ sha2 = "0.11.1"
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 webpki-roots = "1.0.10"
 x509-parser = "0.18.1"
+notify = "8.2.0"
+regex = "1.13.1"
+serde_json.workspace = true
 
 [dev-dependencies]
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2"] }

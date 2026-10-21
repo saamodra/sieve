@@ -6,7 +6,7 @@ sieve is an HTTP and HTTPS debug proxy for Android and iOS, written in Rust. It 
 
 sieve is pre-alpha and built in phases. The full plan, with a checklist for each phase, is in [docs/PLAN.md](docs/PLAN.md).
 
-Phases 0 to 4 are implemented: the certificate authority, the proxy (HTTP/1.1, HTTP/2, WebSocket), the web UI, and device setup for Android (modes 1 and 2), the iOS Simulator, and physical iPhones. Device setup has not yet been verified on real devices; [docs/TESTING.md](docs/TESTING.md) is the manual test guide. Phase 5 (rules, breakpoints, Frida, VPN mode) is not started.
+Phases 0 to 4 are implemented: the certificate authority, the proxy (HTTP/1.1, HTTP/2, WebSocket), the web UI, and device setup for Android (modes 1 and 2), the iOS Simulator, and physical iPhones. Device setup has not yet been verified on real devices; [docs/TESTING.md](docs/TESTING.md) is the manual test guide. Phase 5 is done as needed; 5c (Frida certificate-pinning bypass on Android, plus docs for non-jailbroken iOS and Flutter) is done — see [docs/frida.md](docs/frida.md). Rules, breakpoints, and VPN mode are not started.
 
 ## Build from source
 
@@ -71,6 +71,10 @@ Run `sieve android teardown` when you are done. It clears `http_proxy` and remov
 ### Android, mode 2 (emulator or rooted device)
 
 `sieve android inject-ca` installs the CA into the system certificate store, so apps that trust the system store will accept it without changes to their code. It requires either a Google APIs emulator image or a rooted device, because the store is not writable otherwise. Google Play images do not allow `adb root`. Injection is not persistent: it is lost on reboot, so run the command again after a restart.
+
+### Android, VPN mode (apps that ignore the proxy)
+
+`sieve android vpn` pairs with the companion app in [`android-vpn/`](android-vpn/README.md), which captures all TCP on the device through a `VpnService` and forwards it to sieve. Use it for apps that bypass `http_proxy`. The command sets up `adb reverse`, pushes the CA, opens the app, and runs the proxy; build and install the app first (see its README). It has not yet been verified on a device. There is no iOS equivalent, because a NetworkExtension needs a paid Apple Developer account.
 
 ### iOS Simulator (macOS only)
 

@@ -190,31 +190,31 @@ This phase is done as needed; each part stands alone, so the order is free.
 
 **5a. Rules engine (rewrite + mock)**
 
-- [ ] Rule = matcher (host, path glob/regex, method, header) + action (modify headers, replace body, replace status, delay, mock response from file, block).
-- [ ] Store rules in a watched TOML/JSON file (`notify`), plus an editor in the UI.
-- [ ] Map Remote: point `api.prod.com` at `localhost:3000` to test a local backend.
+- [x] Rule = matcher (host, path glob/regex, method, header) + action (modify headers, replace body, replace status, delay, mock response from file, block).
+- [x] Store rules in a watched TOML/JSON file (`notify`), plus an editor in the UI.
+- [x] Map Remote: point `api.prod.com` at `localhost:3000` to test a local backend.
 
 **5b. Breakpoints**
 
-- [ ] Requests matching a breakpoint rule are held (using a `oneshot` channel); the UI shows an edit form, then Continue or Abort.
-- [ ] Default timeout of 60 seconds so the app never hangs forever.
+- [x] Requests matching a breakpoint rule are held (using a `oneshot` channel); the UI shows an edit form, then Continue or Abort.
+- [x] Default timeout of 60 seconds so the app never hangs forever.
 
 **5c. Frida for certificate pinning (your own apps or ones you may test)**
 
-- [ ] Android: `sieve android frida --package <id>` pushes `frida-server` for the right ABI, starts it, then spawns the app with an unpinning script.
-- [ ] Use a well-tested open source unpinning script; check its license before bundling.
-- [ ] Non-jailbroken iOS: document re-signing a debug app with the Frida gadget. Not automated in v1.
-- [ ] Flutter note: Flutter apps ignore the system proxy and the OS cert store, so they need Frida or a proxy set in Dart code during debugging.
+- [x] Android: `sieve android frida --package <id>` pushes `frida-server` for the right ABI, starts it, then spawns the app with an unpinning script.
+- [x] Use a well-tested open source unpinning script; check its license before bundling. (No candidate had a license that permitted vendoring — see `docs/frida.md` — so the bundled script is an original sieve implementation of the same public hook points.)
+- [x] Non-jailbroken iOS: document re-signing a debug app with the Frida gadget. Not automated in v1. (`docs/frida.md`)
+- [x] Flutter note: Flutter apps ignore the system proxy and the OS cert store, so they need Frida or a proxy set in Dart code during debugging. (`docs/frida.md`)
 
 **5d. VPN mode (largest, last)**
 
-- [ ] Android: Kotlin companion app with `VpnService` that forwards TCP to the proxy. Reference: HTTP Toolkit's Android app (open source).
-- [ ] iOS: an app with NetworkExtension (Packet Tunnel or App Proxy). Requires a paid Apple Developer account.
+- [x] Android: Kotlin companion app with `VpnService` that forwards TCP to the proxy. Reference: HTTP Toolkit's Android app (open source). Lives in `android-vpn/`; `sieve android vpn` does the host side. Built and unit-tested on the JVM; not yet run on a device.
+- [ ] ~~iOS: an app with NetworkExtension (Packet Tunnel or App Proxy). Requires a paid Apple Developer account.~~ Skipped: no paid Apple Developer account is available.
 
 **5e. Extras**
 
-- [ ] HAR export/import, request replay, diff of two responses.
-- [ ] Scripting plugins (e.g. with `rhai`) for custom rules.
+- [x] HAR export/import, request replay, diff of two responses. (API only: `GET/POST /api/har`, `POST /api/flows/{id}/replay`, `GET /api/diff?a=&b=`; no UI controls yet.)
+- [x] Scripting plugins (e.g. with `rhai`) for custom rules. (`sieve_core::script`, loaded from `scripts_dir()` and wired into the proxy: it runs on requests that no declarative rule already answered. Combining a rule and a script on the same request is not supported yet.)
 
 ## Testing, risks & pitfalls
 

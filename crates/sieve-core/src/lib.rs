@@ -5,6 +5,8 @@ pub mod ca;
 pub mod config;
 pub mod flow;
 pub mod proxy;
+pub mod rules;
+pub mod script;
 
 pub use ca::CertAuthority;
 pub use config::{Config, Paths, ProxyConfig, UiConfig};
