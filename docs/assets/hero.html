@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>sieve hero</title>
+<style>
+  :root { --bg:#0b0d10; --panel:#14171c; --line:#252a32; --fg:#e6e8eb; --dim:#8b929c; --accent:#4cc38a; }
+  * { box-sizing:border-box; margin:0; }
+  body { width:1600px; height:900px; overflow:hidden; background:
+      radial-gradient(900px 420px at 15% -10%, #16322a 0%, transparent 70%), var(--bg);
+    color:var(--fg); font-family:-apple-system,"SF Pro Display","Inter",system-ui,sans-serif; }
+  header { padding:44px 80px 0; }
+  .logo { font:700 22px ui-monospace,"SF Mono",Menlo,monospace; color:var(--accent); letter-spacing:.5px; }
+  h1 { margin-top:12px; font-size:50px; line-height:1.08; letter-spacing:-1.2px; font-weight:700; white-space:nowrap; }
+  h1 span { color:var(--accent); }
+  p.sub { margin-top:16px; font-size:20px; color:var(--dim); white-space:nowrap; line-height:1.45; }
+  .chips { margin-top:22px; display:flex; gap:10px; }
+  .chip { padding:7px 14px; border:1px solid var(--line); border-radius:999px; background:var(--panel);
+    font-size:15px; color:var(--fg); }
+  .chip b { color:var(--accent); font-weight:600; margin-right:6px; }
+  .win { position:absolute; left:80px; top:285px; width:1440px; height:640px; border:1px solid var(--line);
+    border-radius:14px 14px 0 0; background:var(--panel); overflow:hidden;
+    box-shadow:0 30px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(76,195,138,.08); }
+  .bar { height:34px; display:flex; align-items:center; gap:8px; padding:0 14px; border-bottom:1px solid var(--line); background:#101318; }
+  .bar i { width:11px; height:11px; border-radius:50%; background:#2b3039; display:block; }
+  .bar span { margin-left:12px; font:13px ui-monospace,Menlo,monospace; color:var(--dim); }
+  .win img { display:block; width:1440px; }
+  .fade { position:absolute; left:0; right:0; bottom:0; height:140px;
+    background:linear-gradient(to bottom, transparent, var(--bg)); pointer-events:none; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">sieve</div>
+  <h1>See every request your <span>mobile app</span> makes.</h1>
+  <p class="sub">An HTTP/HTTPS debug proxy for Android and iOS. One binary, a live web UI, automated device setup.</p>
+  <div class="chips">
+    <div class="chip"><b>●</b>Android</div>
+    <div class="chip"><b>●</b>iOS Simulator</div>
+    <div class="chip"><b>●</b>iPhone</div>
+    <div class="chip">Rules · Breakpoints · HAR · Copy as curl</div>
+  </div>
+</header>
+<div class="win">
+  <div class="bar"><i></i><i></i><i></i><span>127.0.0.1:8081</span></div>
+  <img src="sieve-ui.png" alt="">
+  <div class="fade"></div>
+</div>
+</body>
+</html>

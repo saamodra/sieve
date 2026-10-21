@@ -258,6 +258,14 @@ pub fn curl(f: &Flow) -> String {
         }
         parts.push(format!("-H {}", shell_quote(&format!("{k}: {v}"))));
     }
+    // Without this curl prints the still-compressed response as binary.
+    if req
+        .headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("accept-encoding"))
+    {
+        parts.push("--compressed".to_string());
+    }
     let body = display_bytes(&req.body);
     let join = |parts: &[String]| format!("curl {}", parts.join(" \\\n  "));
     if body.is_empty() {

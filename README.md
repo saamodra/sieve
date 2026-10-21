@@ -1,5 +1,7 @@
 # sieve
 
+![sieve web UI showing live traffic with a JSON response open](docs/assets/hero.png)
+
 An HTTP/HTTPS debug proxy for Android and iOS, written in Rust.
 
 sieve runs on your Mac, intercepts TLS with its own root CA, and shows every request in a live web UI. Device setup is automated wherever the platform allows, so you can inspect a debug app on an emulator, Simulator, or phone without changing its code.
