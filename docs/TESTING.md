@@ -47,15 +47,27 @@ Passthrough: restart with `sieve start --passthrough example.com` and repeat the
 
 ### Optional: a browser on the Mac
 
-The "browser with a manual proxy" item in Phase 1 needs the CA in your login keychain. Firefox is the easiest to test with, because it has its own proxy settings and leaves the Mac's alone:
+The easiest way is a separate Chrome window that trusts only the sieve CA. It leaves the Mac's proxy settings, its keychain, and your normal Chrome profile alone. Keep `sieve start` running, then:
+
+```sh
+SPKI=$(openssl x509 -in "$(sieve ca path | head -1)" -pubkey -noout \
+  | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64)
+open -na "Google Chrome" --args \
+  --user-data-dir=/tmp/sieve-chrome \
+  --proxy-server=127.0.0.1:8080 \
+  --ignore-certificate-errors-spki-list="$SPKI" \
+  https://example.com
+```
+
+The same flags work for Brave (`open -na "Brave Browser" ...`). Chrome shows an "unsupported command-line flag" banner; that is expected. Close the window when you're done; nothing else needs undoing.
+
+Browse a few HTTP/2 sites. There should be no certificate warnings, and the traffic shows up in the UI. Chrome's own background traffic (to `google.com`, `gstatic.com`, and so on) shows up too.
+
+**Safari, or Chrome in your normal profile**, use the Mac's system proxy and keychain instead. Trust the CA in the login keychain, then set the proxy in System Settings > Network > (your service) > Details > Proxies, for both "Web proxy" and "Secure web proxy", pointing at `127.0.0.1:8080`:
 
 ```sh
 security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db "$CA"
-```
-
-In Firefox, go to Settings > Network Settings > Manual proxy, set HTTP proxy `127.0.0.1` port `8080`, and tick "Also use this proxy for HTTPS". Then turn on Settings > Privacy & Security > Certificates > "Allow Firefox to automatically trust third-party root certificates". Browse a few HTTP/2 sites: there should be no certificate warnings, and the traffic shows up in the UI. When you're done, remove the cert:
-
-```sh
+# when done: turn both proxies off again, then
 security delete-certificate -c "sieve CA" ~/Library/Keychains/login.keychain-db
 ```
 
