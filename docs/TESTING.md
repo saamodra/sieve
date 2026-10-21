@@ -59,7 +59,7 @@ open -na "Google Chrome" --args \
   https://example.com
 ```
 
-The same flags work for Brave (`open -na "Brave Browser" ...`). Chrome shows a "unsupported command-line flag" banner; that is expected. Close the window when you're done; nothing else needs undoing.
+The same flags work for Brave (`open -na "Brave Browser" ...`). Chrome shows an "unsupported command-line flag" banner; that is expected. Close the window when you're done; nothing else needs undoing.
 
 Browse a few HTTP/2 sites. There should be no certificate warnings, and the traffic shows up in the UI. Chrome's own background traffic (to `google.com`, `gstatic.com`, and so on) shows up too.
 
