@@ -457,6 +457,21 @@ mod tests {
     }
 
     #[test]
+    fn bracketed_ipv6_literal_shares_the_cache_entry_with_the_bare_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = ca_in(&dir);
+        let bracketed = ca.leaf("[::1]").unwrap();
+        assert!(Arc::ptr_eq(&bracketed, &ca.leaf("::1").unwrap()));
+
+        let (_, cert) = parse_x509_certificate(&bracketed.chain[0]).unwrap();
+        let san = cert.subject_alternative_name().unwrap().unwrap().value;
+        let mut octets = vec![0; 15];
+        octets.push(1);
+        assert_eq!(san.general_names, vec![GeneralName::IPAddress(&octets)]);
+        verify(&ca, &bracketed, "::1").unwrap();
+    }
+
+    #[test]
     fn leaf_does_not_outlive_the_ca() {
         let dir = tempfile::tempdir().unwrap();
         let ca = ca_in(&dir);
