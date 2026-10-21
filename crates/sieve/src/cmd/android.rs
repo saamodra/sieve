@@ -3,7 +3,7 @@ use clap::{Args, Subcommand};
 use sieve_device::android::{Adb, mode1, system_ca};
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{Context, run_session};
+use crate::app::{Context, ensure_port_free, run_session};
 
 #[derive(Args)]
 pub struct AndroidArgs {
@@ -34,6 +34,8 @@ pub async fn run(ctx: Context, args: AndroidArgs) -> Result<()> {
     let port = ctx.config.proxy.listen.port();
     match args.command {
         AndroidCommand::Setup => {
+            ensure_port_free(ctx.config.proxy.listen)?;
+            ensure_port_free(ctx.config.ui.listen)?;
             let device = mode1::select_device(&adb, serial).await?;
             let ca = ctx.load_ca()?;
             mode1::setup(&adb, &device, port, ca.cert_pem()).await?;
