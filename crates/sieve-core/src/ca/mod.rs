@@ -23,8 +23,10 @@ use tracing::{info, warn};
 
 use crate::config::Paths;
 
-/// How long a newly generated root CA is valid.
-const CA_VALIDITY: Duration = Duration::days(365);
+/// How long a newly generated root CA is valid. Roots are not subject to the
+/// 398-day limit that applies to leaves, and a long lifetime means devices
+/// don't need the CA reinstalled every year. Existing CAs keep their own dates.
+const CA_VALIDITY: Duration = Duration::days(3650);
 /// Leaf certificates are valid for at most this long (Apple caps TLS server
 /// certificates at 398 days).
 const LEAF_VALIDITY: Duration = Duration::days(365);
@@ -359,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_ca_is_a_ca_valid_for_about_a_year() {
+    fn generated_ca_is_a_ca_valid_for_about_ten_years() {
         let dir = tempfile::tempdir().unwrap();
         let ca = ca_in(&dir);
         let (_, cert) = parse_x509_certificate(ca.cert_der()).unwrap();
@@ -372,7 +374,7 @@ mod tests {
 
         let validity = cert.validity();
         let lifetime = validity.not_after.to_datetime() - validity.not_before.to_datetime();
-        assert!(lifetime >= Duration::days(360) && lifetime <= Duration::days(400));
+        assert!(lifetime >= Duration::days(3600) && lifetime <= Duration::days(3700));
         assert!(validity.is_valid());
     }
 
