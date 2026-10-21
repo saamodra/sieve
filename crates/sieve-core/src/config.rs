@@ -96,6 +96,12 @@ pub struct ProxyConfig {
     /// PEM files with extra roots to trust when verifying upstream servers,
     /// on top of the built-in and OS roots.
     pub upstream_ca_files: Vec<PathBuf>,
+    /// macOS only. When non-empty, a connection from a local process is
+    /// intercepted only if that process's executable path contains one of
+    /// these strings; anything else is tunneled untouched and not recorded.
+    /// `ios-sim` uses `/CoreSimulator/` so the Mac's own traffic is left alone.
+    /// Connections from other machines are always intercepted.
+    pub intercept_processes: Vec<String>,
 }
 
 impl Default for ProxyConfig {
@@ -105,6 +111,7 @@ impl Default for ProxyConfig {
             passthrough_hosts: Vec::new(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             upstream_ca_files: Vec::new(),
+            intercept_processes: Vec::new(),
         }
     }
 }

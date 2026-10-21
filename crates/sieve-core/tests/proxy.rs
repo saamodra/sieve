@@ -526,3 +526,50 @@ async fn flow_ids_are_unique() {
     ids.dedup();
     assert_eq!(ids.len(), 3);
 }
+
+/// No flow at all arrives within a short wait.
+async fn assert_no_flows(rx: &mut FlowReceiver) {
+    let next = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+    assert!(next.is_err(), "unexpected flow: {next:?}");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn processes_outside_intercept_processes_are_tunneled_unrecorded() {
+    let upstream = spawn_https_upstream(&[b"http/1.1"]).await;
+    let config = ProxyConfig {
+        intercept_processes: vec!["/no-such-program/".into()],
+        ..ProxyConfig::default()
+    };
+    let mut sieve = spawn_sieve(config, None).await;
+    // Trusting only the upstream's own CA proves the request was not intercepted.
+    let client = client(sieve.addr, &upstream.ca_der, false);
+
+    let url = format!("https://localhost:{}/hello", upstream.addr.port());
+    let res = client.get(&url).send().await.unwrap();
+    assert_eq!(res.text().await.unwrap(), HELLO);
+    drop(client);
+    assert_no_flows(&mut sieve.flows).await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn processes_in_intercept_processes_are_intercepted() {
+    let upstream = spawn_https_upstream(&[b"http/1.1"]).await;
+    // This test binary is the client.
+    let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let config = ProxyConfig {
+        intercept_processes: vec![exe.file_name().unwrap().to_string_lossy().into_owned()],
+        ..ProxyConfig::default()
+    };
+    let mut sieve = spawn_sieve(config, Some(&upstream.ca_der)).await;
+    let client = client(sieve.addr, sieve.ca.cert_der(), false);
+
+    let url = format!("https://localhost:{}/hello", upstream.addr.port());
+    let res = client.get(&url).send().await.unwrap();
+    assert_eq!(res.text().await.unwrap(), HELLO);
+
+    let flow = completed_flow(&mut sieve.flows, |f| f.request.url == url).await;
+    assert_eq!(flow.kind, FlowKind::Http);
+    assert_eq!(flow.response.as_ref().unwrap().status, 200);
+}
