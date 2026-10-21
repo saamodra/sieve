@@ -666,3 +666,117 @@ async fn a_request_the_client_cancels_becomes_a_flow_with_an_error() {
     let error = flow.error.as_deref().unwrap();
     assert!(error.contains("cancelled"), "{error}");
 }
+
+async fn spawn_sieve_with_rules(rules: Vec<sieve_core::rules::Rule>) -> Sieve {
+    let dir = tempfile::tempdir().unwrap();
+    let ca = Arc::new(CertAuthority::load_or_create(&Paths::at(dir.path())).unwrap());
+    let engine = sieve_core::rules::RuleEngine::new(None);
+    engine.replace(rules).unwrap();
+    let flows = flow::channel();
+    let rx = flows.subscribe();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let proxy = Proxy::new(ProxyConfig::default(), ca.clone(), flows).with_rules(engine);
+    let shutdown = CancellationToken::new();
+    tokio::spawn(proxy.serve(listener, shutdown.clone()));
+    Sieve {
+        addr,
+        ca,
+        flows: rx,
+        shutdown,
+        _dir: dir,
+    }
+}
+
+fn host_rule(host: &str, action: sieve_core::rules::Action) -> sieve_core::rules::Rule {
+    sieve_core::rules::Rule {
+        matcher: sieve_core::rules::Matcher {
+            host: Some(host.to_string()),
+            ..Default::default()
+        },
+        action,
+        ..Default::default()
+    }
+}
+
+/// Sends a WebSocket handshake for `url` through the proxy and returns the
+/// response head.
+async fn websocket_handshake(proxy: SocketAddr, url: &str, host: &str) -> (TcpStream, String) {
+    let mut tcp = TcpStream::connect(proxy).await.unwrap();
+    let request = format!(
+        "GET {url} HTTP/1.1\r\nHost: {host}\r\nConnection: Upgrade\r\n\
+         Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    );
+    tcp.write_all(request.as_bytes()).await.unwrap();
+    let mut head = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !head.ends_with(b"\r\n\r\n") {
+            head.push(tcp.read_u8().await.unwrap());
+        }
+    })
+    .await
+    .expect("timed out waiting for the handshake response");
+    (tcp, String::from_utf8(head).unwrap())
+}
+
+#[tokio::test]
+async fn a_block_rule_blocks_the_websocket_handshake() {
+    // Counts the connections that reach the upstream.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = listener.local_addr().unwrap();
+    let (reached, mut reached_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let _ = reached.send(tcp);
+        }
+    });
+    let mut sieve = spawn_sieve_with_rules(vec![host_rule(
+        "127.0.0.1",
+        sieve_core::rules::Action {
+            block: true,
+            ..Default::default()
+        },
+    )])
+    .await;
+
+    let url = format!("http://{upstream}/ws");
+    let (_tcp, head) = websocket_handshake(sieve.addr, &url, &upstream.to_string()).await;
+    assert!(head.starts_with("HTTP/1.1 403"), "{head}");
+
+    let flow = completed_flow(&mut sieve.flows, |f| {
+        f.request.url == format!("ws://{upstream}/ws")
+    })
+    .await;
+    assert_eq!(flow.kind, FlowKind::WebSocket);
+    assert_eq!(flow.response.as_ref().unwrap().status, 403);
+    let reached = tokio::time::timeout(Duration::from_millis(300), reached_rx.recv()).await;
+    assert!(reached.is_err(), "the handshake reached the upstream");
+}
+
+#[tokio::test]
+async fn map_remote_and_header_rules_apply_to_the_websocket_handshake() {
+    let upstream = spawn_http_upstream().await;
+    let mut sieve = spawn_sieve_with_rules(vec![host_rule(
+        "ws.invalid",
+        sieve_core::rules::Action {
+            map_remote: Some(upstream.to_string()),
+            set_request_headers: [("x-via".to_string(), "sieve".to_string())].into(),
+            ..Default::default()
+        },
+    )])
+    .await;
+
+    let (mut tcp, head) =
+        websocket_handshake(sieve.addr, "http://ws.invalid/ws", "ws.invalid").await;
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    tcp.write_all(b"ping").await.unwrap();
+    let mut echo = [0; 4];
+    tcp.read_exact(&mut echo).await.unwrap();
+    assert_eq!(&echo, b"ping");
+
+    let flow = completed_flow(&mut sieve.flows, |f| f.kind == FlowKind::WebSocket).await;
+    assert_eq!(flow.request.url, format!("ws://{upstream}/ws"));
+    assert_eq!(header(&flow.request.headers, "x-via"), Some("sieve"));
+    assert_eq!(flow.response.as_ref().unwrap().status, 101);
+}
