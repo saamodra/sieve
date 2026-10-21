@@ -194,6 +194,29 @@ async fn on_request_hook_rewrites_a_header_seen_by_the_server() {
 }
 
 #[tokio::test]
+async fn scripts_skip_connections_outside_intercept_processes() {
+    let upstream = spawn_upstream().await;
+    let config = ProxyConfig {
+        intercept_processes: vec!["/no-such-program/".into()],
+        ..ProxyConfig::default()
+    };
+    let sieve = spawn_sieve_with(
+        config,
+        r#"fn on_request(req) {
+            req.headers.set_header("x-via", "script");
+            req
+        }"#,
+    )
+    .await;
+    let res = client(sieve.addr)
+        .get(format!("http://{upstream}/thing"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.text().await.unwrap(), "/thing via=-");
+}
+
+#[tokio::test]
 async fn on_request_hook_can_answer_without_the_server() {
     let upstream = spawn_upstream().await;
     let sieve = spawn_sieve(

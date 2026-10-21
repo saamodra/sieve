@@ -406,7 +406,10 @@ impl Conn {
             return rules::forward(self, parts, body, exchange, client_version, plan).await;
         }
         // No declarative rule matched; scripting plugins get a turn instead.
-        if let Some(scripts) = self.shared.scripts.clone().filter(|s| !s.is_empty()) {
+        // Like rules, they leave quiet connections alone.
+        if !self.quiet
+            && let Some(scripts) = self.shared.scripts.clone().filter(|s| !s.is_empty())
+        {
             return rules::forward_with_scripts(
                 self,
                 parts,
