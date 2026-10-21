@@ -1,10 +1,15 @@
 //! Android mode 1: `adb reverse`, global `http_proxy`, user CA install, NSC
 //! snippet, and health check.
 
-use std::{fmt, future::Future, path::PathBuf};
+use std::{
+    fmt, fs,
+    future::Future,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
-use tracing::warn;
+use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
 use super::AndroidBridge;
 
@@ -115,17 +120,153 @@ fn tcp(port: u16) -> String {
     format!("tcp:{port}")
 }
 
+/// What the device's `http_proxy` was before sieve touched it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedProxy {
+    pub serial: String,
+    /// `None` when the device had no proxy.
+    pub http_proxy: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct LeftoverProxy {
+    pub path: PathBuf,
+    pub state: SavedProxy,
+}
+
+const STATE_PREFIX: &str = "android-proxy-";
+
+/// One file per device, so two devices can be set up at the same time.
+pub fn state_file(state_dir: &Path, serial: &str) -> PathBuf {
+    let safe: String = serial
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    state_dir.join(format!("{STATE_PREFIX}{safe}.json"))
+}
+
+/// `settings get` prints `null` when unset, and `:0` also means no proxy.
+fn parse_http_proxy(output: &str) -> Option<String> {
+    match output.trim() {
+        "" | "null" | ":0" => None,
+        value => Some(value.to_string()),
+    }
+}
+
+/// True for a proxy on the device's own loopback, which is what `setup` sets
+/// (through `adb reverse`) and is dead once sieve is gone. The port may differ
+/// between runs.
+fn is_loopback_proxy(value: &str) -> bool {
+    let host = value.rsplit_once(':').map_or(value, |(host, _)| host);
+    matches!(
+        host.trim_matches(['[', ']']),
+        "127.0.0.1" | "localhost" | "::1"
+    )
+}
+
+/// Saves the device's current `http_proxy` before sieve changes it. An
+/// existing file is kept: it holds the original value, while the device may
+/// by now show sieve's own proxy.
+async fn save_proxy<B: AndroidBridge>(bridge: &B, state_dir: &Path, serial: &str) -> Result<()> {
+    let file = state_file(state_dir, serial);
+    if file.exists() {
+        return Ok(());
+    }
+    let current = bridge
+        .shell(Some(serial), "settings get global http_proxy")
+        .await
+        .context("reading http_proxy")?;
+    let mut http_proxy = parse_http_proxy(&current);
+    if let Some(stale) = http_proxy.take_if(|v| is_loopback_proxy(v)) {
+        warn!(
+            serial,
+            "found a stale sieve proxy ({stale}) on the device; treating it as no previous proxy"
+        );
+    }
+    let state = SavedProxy {
+        serial: serial.to_string(),
+        http_proxy,
+    };
+    fs::create_dir_all(state_dir).with_context(|| format!("creating {}", state_dir.display()))?;
+    fs::write(&file, serde_json::to_vec_pretty(&state)?)
+        .with_context(|| format!("writing {}", file.display()))
+}
+
+fn load_state(file: &Path) -> Result<SavedProxy> {
+    let text = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("parsing {}", file.display()))
+}
+
+/// The saved states that runs which never tore down left behind.
+pub fn find_leftovers(state_dir: &Path) -> Result<Vec<LeftoverProxy>> {
+    let Ok(entries) = fs::read_dir(state_dir) else {
+        return Ok(Vec::new());
+    };
+    let mut found = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let is_state = path.extension().is_some_and(|e| e == "json")
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(STATE_PREFIX));
+        if is_state {
+            let state = load_state(&path)?;
+            found.push(LeftoverProxy { path, state });
+        }
+    }
+    found.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(found)
+}
+
+/// Puts the saved `http_proxy` back (`:0` if there was none) and deletes the
+/// state file. The file is kept if the device rejects the change, so it can be
+/// retried. Without a state file this resets the proxy to `:0`.
+pub async fn restore_proxy<B: AndroidBridge>(
+    bridge: &B,
+    state_dir: &Path,
+    serial: &str,
+) -> Result<()> {
+    let file = state_file(state_dir, serial);
+    let value = if file.exists() {
+        load_state(&file)?.http_proxy.unwrap_or_else(|| ":0".into())
+    } else {
+        ":0".into()
+    };
+    bridge
+        .shell(
+            Some(serial),
+            &format!("settings put global http_proxy {value}"),
+        )
+        .await
+        .context("restoring http_proxy")?;
+    if file.exists() {
+        fs::remove_file(&file).with_context(|| format!("removing {}", file.display()))?;
+    }
+    info!(serial, "device http_proxy restored");
+    Ok(())
+}
+
 /// Routes the device through the proxy and pushes the CA. If a step fails, the
 /// steps already done are undone before the error is returned.
 pub async fn setup<B: AndroidBridge>(
     bridge: &B,
+    state_dir: &Path,
     serial: &str,
     port: u16,
     ca_pem: &str,
 ) -> Result<()> {
+    // Nothing has changed yet, so a failure here needs no cleanup.
+    save_proxy(bridge, state_dir, serial).await?;
     let result = apply(bridge, serial, port, ca_pem).await;
     if result.is_err()
-        && let Err(e) = teardown(bridge, serial, port).await
+        && let Err(e) = teardown(bridge, state_dir, serial, port).await
     {
         warn!("cleanup after failed setup also failed: {e:#}");
     }
@@ -167,13 +308,15 @@ async fn push_ca<B: AndroidBridge>(bridge: &B, serial: &str, ca_pem: &str) -> Re
 }
 
 /// Restores `http_proxy` and removes the reverse. Safe to run repeatedly.
-pub async fn teardown<B: AndroidBridge>(bridge: &B, serial: &str, port: u16) -> Result<()> {
+pub async fn teardown<B: AndroidBridge>(
+    bridge: &B,
+    state_dir: &Path,
+    serial: &str,
+    port: u16,
+) -> Result<()> {
     let s = Some(serial);
     // Attempt both steps even if the first fails.
-    let proxy = bridge
-        .shell(s, "settings put global http_proxy :0")
-        .await
-        .context("resetting http_proxy");
+    let proxy = restore_proxy(bridge, state_dir, serial).await;
     let reverse = match bridge.adb(s, &["reverse", "--remove", &tcp(port)]).await {
         Err(e) if !e.to_string().contains("not found") => Err(e).context("removing adb reverse"),
         _ => Ok(()),
@@ -184,13 +327,19 @@ pub async fn teardown<B: AndroidBridge>(bridge: &B, serial: &str, port: u16) -> 
 
 /// Awaits `session`, then always runs teardown, whether the session returned
 /// `Ok`, `Err`, or the caller shut it down.
-pub async fn with_teardown<B, F>(bridge: &B, serial: &str, port: u16, session: F) -> Result<()>
+pub async fn with_teardown<B, F>(
+    bridge: &B,
+    state_dir: &Path,
+    serial: &str,
+    port: u16,
+    session: F,
+) -> Result<()>
 where
     B: AndroidBridge,
     F: Future<Output = Result<()>>,
 {
     let result = session.await;
-    let cleanup = teardown(bridge, serial, port).await;
+    let cleanup = teardown(bridge, state_dir, serial, port).await;
     match (result, cleanup) {
         (Err(e), cleanup) => {
             if let Err(c) = cleanup {
@@ -470,19 +619,21 @@ mod tests {
     #[tokio::test]
     async fn setup_runs_exact_adb_sequence_with_config_port() {
         let m = Mock::default();
-        setup(&m, "emu", 9090, "PEM").await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        setup(&m, dir.path(), "emu", 9090, "PEM").await.unwrap();
         let calls = m.calls();
-        assert_eq!(calls.len(), 3, "{calls:?}");
-        assert_eq!(calls[0], "-s emu reverse tcp:9090 tcp:9090");
+        assert_eq!(calls.len(), 4, "{calls:?}");
+        assert_eq!(calls[0], "-s emu shell settings get global http_proxy");
+        assert_eq!(calls[1], "-s emu reverse tcp:9090 tcp:9090");
         assert_eq!(
-            calls[1],
+            calls[2],
             "-s emu shell settings put global http_proxy 127.0.0.1:9090"
         );
-        assert!(calls[2].starts_with("-s emu push "), "{}", calls[2]);
+        assert!(calls[3].starts_with("-s emu push "), "{}", calls[3]);
         assert!(
-            calls[2].ends_with(" /sdcard/Download/sieve-ca.crt"),
+            calls[3].ends_with(" /sdcard/Download/sieve-ca.crt"),
             "{}",
-            calls[2]
+            calls[3]
         );
     }
 
@@ -492,7 +643,8 @@ mod tests {
             fail: vec![("push", "no space")],
             ..Default::default()
         };
-        let e = setup(&m, "emu", 8080, "PEM").await.unwrap_err();
+        let dir = tempfile::tempdir().unwrap();
+        let e = setup(&m, dir.path(), "emu", 8080, "PEM").await.unwrap_err();
         assert!(format!("{e:#}").contains("no space"));
         let calls = m.calls();
         assert_eq!(
@@ -513,8 +665,9 @@ mod tests {
             )],
             ..Default::default()
         };
-        teardown(&m, "emu", 8080).await.unwrap();
-        teardown(&m, "emu", 8080).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        teardown(&m, dir.path(), "emu", 8080).await.unwrap();
+        teardown(&m, dir.path(), "emu", 8080).await.unwrap();
         assert_eq!(
             m.calls()[..2],
             [
@@ -530,7 +683,8 @@ mod tests {
             fail: vec![("reverse --remove", "device offline")],
             ..Default::default()
         };
-        assert!(teardown(&m, "emu", 8080).await.is_err());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(teardown(&m, dir.path(), "emu", 8080).await.is_err());
         // The proxy reset still ran.
         assert_eq!(m.calls().len(), 2);
     }
@@ -540,7 +694,8 @@ mod tests {
         for session in [Err(anyhow!("proxy crashed")), Ok(())] {
             let failed = session.is_err();
             let m = Mock::default();
-            let r = with_teardown(&m, "emu", 8080, async { session }).await;
+            let dir = tempfile::tempdir().unwrap();
+            let r = with_teardown(&m, dir.path(), "emu", 8080, async { session }).await;
             assert_eq!(r.is_err(), failed);
             assert_eq!(
                 m.calls(),
@@ -550,6 +705,119 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn teardown_restores_previous_proxy_and_removes_state() {
+        let m = Mock {
+            replies: vec![("settings get", "corp.example:3128\n")],
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        setup(&m, dir.path(), "emu", 8080, "PEM").await.unwrap();
+        assert!(state_file(dir.path(), "emu").exists());
+        teardown(&m, dir.path(), "emu", 8080).await.unwrap();
+        let calls = m.calls();
+        assert_eq!(
+            calls[calls.len() - 2..],
+            [
+                "-s emu shell settings put global http_proxy corp.example:3128",
+                "-s emu reverse --remove tcp:8080"
+            ]
+        );
+        assert!(!state_file(dir.path(), "emu").exists());
+    }
+
+    #[tokio::test]
+    async fn teardown_without_previous_proxy_resets_to_zero() {
+        for unset in ["null\n", ":0\n", ""] {
+            let m = Mock {
+                replies: vec![("settings get", unset)],
+                ..Default::default()
+            };
+            let dir = tempfile::tempdir().unwrap();
+            setup(&m, dir.path(), "emu", 8080, "PEM").await.unwrap();
+            assert_eq!(
+                find_leftovers(dir.path()).unwrap()[0].state.http_proxy,
+                None
+            );
+            teardown(&m, dir.path(), "emu", 8080).await.unwrap();
+            assert!(
+                m.calls()
+                    .contains(&"-s emu shell settings put global http_proxy :0".to_string())
+            );
+            assert!(find_leftovers(dir.path()).unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn second_setup_keeps_the_original_saved_proxy() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = Mock {
+            replies: vec![("settings get", "corp.example:3128")],
+            ..Default::default()
+        };
+        setup(&first, dir.path(), "emu", 8080, "PEM").await.unwrap();
+        // The device now shows sieve's own proxy.
+        let second = Mock {
+            replies: vec![("settings get", "127.0.0.1:8080")],
+            ..Default::default()
+        };
+        setup(&second, dir.path(), "emu", 8080, "PEM")
+            .await
+            .unwrap();
+        assert!(!second.calls().iter().any(|c| c.contains("settings get")));
+        let left = find_leftovers(dir.path()).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].state.serial, "emu");
+        assert_eq!(
+            left[0].state.http_proxy.as_deref(),
+            Some("corp.example:3128")
+        );
+    }
+
+    #[tokio::test]
+    async fn state_is_kept_when_restore_fails() {
+        let m = Mock {
+            replies: vec![("settings get", "corp.example:3128")],
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        setup(&m, dir.path(), "emu", 8080, "PEM").await.unwrap();
+        let broken = Mock {
+            fail: vec![("settings put", "device offline")],
+            ..Default::default()
+        };
+        assert!(restore_proxy(&broken, dir.path(), "emu").await.is_err());
+        assert_eq!(find_leftovers(dir.path()).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_sieve_proxy_is_not_saved_as_previous() {
+        for stale in ["127.0.0.1:9999", "localhost:8080", "::1:8080", "[::1]:8080"] {
+            let m = Mock {
+                replies: vec![("settings get", stale)],
+                ..Default::default()
+            };
+            let dir = tempfile::tempdir().unwrap();
+            setup(&m, dir.path(), "emu", 8080, "PEM").await.unwrap();
+            assert_eq!(
+                find_leftovers(dir.path()).unwrap()[0].state.http_proxy,
+                None,
+                "{stale}"
+            );
+            teardown(&m, dir.path(), "emu", 8080).await.unwrap();
+            assert!(
+                m.calls()
+                    .contains(&"-s emu shell settings put global http_proxy :0".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn state_file_name_is_safe_for_network_serials() {
+        let f = state_file(Path::new("/s"), "192.168.1.5:5555");
+        assert_eq!(f, Path::new("/s/android-proxy-192.168.1.5_5555.json"));
     }
 
     #[test]

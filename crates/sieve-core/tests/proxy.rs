@@ -341,6 +341,55 @@ async fn request_body_is_captured_and_forwarded() {
     );
 }
 
+/// An upstream that answers 413 as soon as it has read the request head,
+/// without reading the body.
+async fn spawn_early_413_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buf = [0; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match tcp.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let _ = tcp
+                    .write_all(
+                        b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .await;
+                // Keep the socket open without reading the rest of the body.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn request_body_is_recorded_when_the_server_responds_early() {
+    let upstream = spawn_early_413_upstream().await;
+    let mut sieve = spawn_sieve(ProxyConfig::default(), None).await;
+    let client = client(sieve.addr, sieve.ca.cert_der(), false);
+
+    let sent = vec![b'x'; 4 * 1024 * 1024];
+    let url = format!("http://127.0.0.1:{}/upload", upstream.port());
+    // The client may fail while sending; only the recorded flow matters here.
+    let _ = client.post(&url).body(sent.clone()).send().await;
+
+    let flow = completed_flow(&mut sieve.flows, |f| f.request.url == url).await;
+    assert_eq!(flow.response.as_ref().unwrap().status, 413);
+    let body = &flow.request.body;
+    assert!(!body.raw.is_empty(), "the request body was not recorded");
+    assert_eq!(body.size, body.raw.len() as u64);
+    assert!(sent.starts_with(&body.raw));
+}
+
 #[tokio::test]
 async fn gzip_body_is_decoded_in_the_flow_but_forwarded_as_is() {
     let upstream = spawn_https_upstream(&[b"http/1.1"]).await;

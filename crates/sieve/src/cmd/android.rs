@@ -18,7 +18,7 @@ pub struct AndroidArgs {
 enum AndroidCommand {
     /// Route the device through sieve (mode 1, no root) and run the proxy.
     Setup,
-    /// Undo `setup`: clear http_proxy and remove adb reverse.
+    /// Undo `setup`: restore the previous http_proxy and remove adb reverse.
     Teardown,
     /// Print the network_security_config.xml snippet for debug builds.
     Nsc,
@@ -38,11 +38,13 @@ pub async fn run(ctx: Context, args: AndroidArgs) -> Result<()> {
             ensure_port_free(ctx.config.ui.listen)?;
             let device = mode1::select_device(&adb, serial).await?;
             let ca = ctx.load_ca()?;
-            mode1::setup(&adb, &device, port, ca.cert_pem()).await?;
+            let state_dir = ctx.paths.state_dir();
+            mode1::setup(&adb, &state_dir, &device, port, ca.cert_pem()).await?;
             println!("Device {device} now proxies through 127.0.0.1:{port}.\n");
             println!("{}\n", mode1::install_steps());
             mode1::with_teardown(
                 &adb,
+                &state_dir,
                 &device,
                 port,
                 run_session(&ctx, ca, CancellationToken::new()),
@@ -51,8 +53,8 @@ pub async fn run(ctx: Context, args: AndroidArgs) -> Result<()> {
         }
         AndroidCommand::Teardown => {
             let device = mode1::select_device(&adb, serial).await?;
-            mode1::teardown(&adb, &device, port).await?;
-            println!("Device {device}: http_proxy reset and adb reverse removed.");
+            mode1::teardown(&adb, &ctx.paths.state_dir(), &device, port).await?;
+            println!("Device {device}: http_proxy restored and adb reverse removed.");
             Ok(())
         }
         AndroidCommand::Nsc => {

@@ -109,13 +109,14 @@ networksetup -setsecurewebproxystate <service> off
 
 Replace `<service>` with the network service you use, such as `Wi-Fi`. The first command lists the names.
 
-sieve also saves the proxy settings it replaces. To restore them from that saved state, run:
+sieve also saves the proxy settings it replaces: the Mac's, and each Android device's previous `http_proxy`. `sieve android teardown` puts the device's old value back, not just `:0`. To see what a crashed run left behind, or to restore it, run:
 
 ```sh
+sieve doctor            # list leftover state
 sieve doctor --restore
 ```
 
-`sieve doctor --restore` restores system proxy settings saved by a setup that did not tear down. Use the manual commands above if it is not available or does not restore the settings you expect.
+`sieve doctor --restore` restores the Mac proxy settings and the Android `http_proxy` values saved by a setup that did not tear down. An Android device must be connected for its value to be restored; otherwise it is skipped and its state file is kept for the next run. It does not remove `adb reverse` rules; use `sieve android teardown` or the manual commands above for that. Use the manual commands above if it does not restore the settings you expect.
 
 ## Troubleshooting
 
