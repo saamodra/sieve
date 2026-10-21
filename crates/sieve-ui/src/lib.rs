@@ -3,10 +3,12 @@
 mod api;
 mod assets;
 mod auth;
+mod diff;
+mod har_import;
 mod model;
 mod store;
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicU64};
 
 use anyhow::{Context, Result, bail};
 use axum::{Router, middleware};
@@ -106,6 +108,8 @@ fn build_with_rules(
         store,
         events,
         rules,
+        flows: flows.clone(),
+        next_id: Arc::new(AtomicU64::new(api::SYNTHETIC_ID_BASE)),
     })
     .merge(extra_routes)
     .fallback(assets::serve_asset);

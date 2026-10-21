@@ -142,6 +142,18 @@ impl FlowStore {
         self.lock().order.len()
     }
 
+    /// Every flow matching `filter`, in arrival order.
+    pub fn matching(&self, filter: &FlowFilter) -> Vec<Arc<Flow>> {
+        let inner = self.lock();
+        inner
+            .order
+            .iter()
+            .map(|id| &inner.flows[id])
+            .filter(|f| filter.matches(&FlowSummary::from(f.as_ref())))
+            .cloned()
+            .collect()
+    }
+
     /// Summaries matching `filter` in arrival order: returns the total number
     /// of matches and the `offset..offset + limit` window of them.
     pub fn list(
