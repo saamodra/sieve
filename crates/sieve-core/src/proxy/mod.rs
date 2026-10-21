@@ -15,6 +15,7 @@ use std::{
     convert::Infallible,
     error::Error as StdError,
     net::SocketAddr,
+    path::Path,
     pin::Pin,
     sync::{
         Arc,
@@ -38,7 +39,7 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto,
 };
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::{CertificateDer, pem::PemObject};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -65,9 +66,26 @@ pub async fn run(
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("binding the proxy to {}", config.listen))?;
-    Proxy::new(config, ca, flows)
-        .serve(listener, shutdown)
-        .await
+    let mut proxy = Proxy::new(config, ca, flows);
+    for path in proxy.config.upstream_ca_files.clone() {
+        for cert in load_pem_certs(&path)? {
+            proxy = proxy.trust_upstream_root(cert.to_vec());
+        }
+    }
+    proxy.serve(listener, shutdown).await
+}
+
+/// Reads every certificate from a PEM file, failing if there is none.
+fn load_pem_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
+    let certs = CertificateDer::pem_file_iter(path)
+        .and_then(|iter| iter.collect::<Result<Vec<_>, _>>())
+        .with_context(|| format!("reading upstream CA file {}", path.display()))?;
+    anyhow::ensure!(
+        !certs.is_empty(),
+        "upstream CA file {} contains no certificates",
+        path.display()
+    );
+    Ok(certs)
 }
 
 /// A configured proxy that is not serving yet. [`run`] covers the usual case;

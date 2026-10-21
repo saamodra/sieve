@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::Result;
 use clap::Args;
@@ -22,6 +22,10 @@ pub struct StartArgs {
     /// Keep at most this many bytes of each body [default: from config, 5 MiB].
     #[arg(long, value_name = "BYTES")]
     max_body_bytes: Option<usize>,
+    /// Trust the roots in this PEM file when verifying upstream servers, on
+    /// top of the built-in ones. Repeatable.
+    #[arg(long = "upstream-ca", value_name = "PEM")]
+    upstream_ca_files: Vec<PathBuf>,
 }
 
 pub async fn run(mut ctx: Context, args: StartArgs) -> Result<()> {
@@ -38,6 +42,11 @@ pub async fn run(mut ctx: Context, args: StartArgs) -> Result<()> {
         .proxy
         .passthrough_hosts
         .extend(args.passthrough_hosts);
+
+    ctx.config
+        .proxy
+        .upstream_ca_files
+        .extend(args.upstream_ca_files);
 
     let ca = ctx.load_ca()?;
     let ca_path = ctx.paths.ca_cert();

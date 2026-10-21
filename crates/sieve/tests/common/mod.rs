@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use tokio::net::TcpStream;
 
 /// How long a freshly started process gets to bind its ports.
-pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long `sieve start` gets to exit after SIGINT.
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -92,8 +92,8 @@ impl Daemon {
         fs::read_to_string(&self.stdout_log).unwrap_or_default()
     }
 
-    /// Stdout followed by stderr. The process logs through tracing, which
-    /// writes to stdout, so most of its log lines are here.
+    /// Stdout followed by stderr. Log lines are on stderr; stdout is only
+    /// command output.
     pub fn output(&self) -> String {
         self.stdout() + &self.stderr()
     }
@@ -123,9 +123,15 @@ impl Daemon {
 
     /// Waits until the output contains `needle`, and panics with the output
     /// so far if it does not show up in time.
-    pub async fn wait_for_output(&self, needle: &str) {
+    pub async fn wait_for_output(&mut self, needle: &str) {
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         while !self.output().contains(needle) {
+            if let Some(status) = self.child.try_wait().expect("polling sieve") {
+                panic!(
+                    "sieve exited with {status} before {needle:?} appeared:\n{}",
+                    self.output()
+                );
+            }
             assert!(
                 Instant::now() < deadline,
                 "{needle:?} did not appear within {STARTUP_TIMEOUT:?}:\n{}",

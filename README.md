@@ -46,7 +46,7 @@ Start the proxy and the web UI (planned, Phase 1b and Phase 3):
 sieve start
 ```
 
-By default the proxy listens on `127.0.0.1:8080` and the web UI on `http://localhost:8081`. Both addresses can be changed with `--listen` and `--ui-listen`, and `--passthrough <HOST>` tunnels a host without intercepting it. Requests appear in the web UI as they arrive.
+By default the proxy listens on `127.0.0.1:8080` and the web UI on `http://localhost:8081`. Both addresses can be changed with `--listen` and `--ui-listen`, and `--passthrough <HOST>` tunnels a host without intercepting it. `--upstream-ca <PEM>` (repeatable, or `upstream_ca_files` under `[proxy]` in `config.toml`) trusts extra roots when verifying upstream servers, such as a local backend with its own CA. Requests appear in the web UI as they arrive.
 
 To trust the CA on a device, export it (planned, Phase 1a):
 

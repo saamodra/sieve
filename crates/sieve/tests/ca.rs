@@ -156,7 +156,6 @@ fn regenerate_replaces_the_ca() {
 }
 
 #[test]
-#[ignore = "bug: the run that creates the CA logs to stdout, so `ca export` output is corrupt"]
 fn first_run_keeps_stdout_clean() {
     let dir = TempDir::new().unwrap();
     let der = run_sieve_ok(dir.path(), &["ca", "export", "--format", "der"]);

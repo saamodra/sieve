@@ -93,6 +93,9 @@ pub struct ProxyConfig {
     /// Exact names, or `*.example.com` for every subdomain of example.com.
     pub passthrough_hosts: Vec<String>,
     pub max_body_bytes: usize,
+    /// PEM files with extra roots to trust when verifying upstream servers,
+    /// on top of the built-in and OS roots.
+    pub upstream_ca_files: Vec<PathBuf>,
 }
 
 impl Default for ProxyConfig {
@@ -101,6 +104,7 @@ impl Default for ProxyConfig {
             listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 8080)),
             passthrough_hosts: Vec::new(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            upstream_ca_files: Vec::new(),
         }
     }
 }

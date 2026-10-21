@@ -31,6 +31,8 @@ const HELLO: &str = "hello from the test server";
 struct TlsServer {
     addr: SocketAddr,
     ca_der: CertificateDer<'static>,
+    /// The same root as PEM, for `sieve start --upstream-ca`.
+    ca_pem: String,
 }
 
 impl TlsServer {
@@ -92,7 +94,16 @@ async fn spawn_tls_server(alpn: &[&[u8]]) -> TlsServer {
     TlsServer {
         addr,
         ca_der: ca_cert.der().clone(),
+        ca_pem: ca_cert.pem(),
     }
+}
+
+/// Writes the server's root to a file in the config dir and returns the
+/// `--upstream-ca` arguments that make `sieve start` trust it.
+fn upstream_ca_args(config_dir: &TempDir, server: &TlsServer) -> Vec<String> {
+    let path = config_dir.path().join("upstream-ca.pem");
+    std::fs::write(&path, &server.ca_pem).unwrap();
+    vec!["--upstream-ca".into(), path.to_str().unwrap().into()]
 }
 
 /// Starts `sieve start` on a fresh proxy port with its config in a tempdir,
@@ -133,7 +144,7 @@ async fn assert_passthrough(http1_only: bool) {
     install_crypto_provider();
     let server = spawn_tls_server(&[b"h2", b"http/1.1"]).await;
     let config = TempDir::new().unwrap();
-    let (proxy, daemon) = start_sieve(&config, &["--passthrough", "127.0.0.1"]).await;
+    let (proxy, mut daemon) = start_sieve(&config, &["--passthrough", "127.0.0.1"]).await;
 
     let root = Certificate::from_der(&server.ca_der).unwrap();
     let client = client_through(proxy, root, http1_only);
@@ -171,11 +182,11 @@ async fn intercepted_request_is_logged() {
     install_crypto_provider();
     let server = spawn_tls_server(&[b"h2", b"http/1.1"]).await;
     let config = TempDir::new().unwrap();
-    let (proxy, daemon) = start_sieve(&config, &[]).await;
+    let (proxy, mut daemon) = start_sieve(&config, &[]).await;
 
     // The client trusts the exported CA, so the TLS handshake with the proxy
-    // must succeed. The upstream is not trusted by `sieve start` (see the
-    // ignored MITM tests), so only the proxy's answer is checked here.
+    // must succeed. The upstream is deliberately not trusted by `sieve start`
+    // here, so only the log line is checked, not the response.
     let client = client_through(proxy, exported_ca(&config), true);
     client
         .get(server.url("/hello"))
@@ -189,13 +200,11 @@ async fn intercepted_request_is_logged() {
 }
 
 #[tokio::test]
-#[ignore = "bug: `sieve start` cannot trust a local upstream root, so every intercepted request fails with 502 (UnknownIssuer)"]
 async fn mitm_http1_serves_intact() {
     assert_mitm(true).await;
 }
 
 #[tokio::test]
-#[ignore = "bug: `sieve start` cannot trust a local upstream root, so every intercepted request fails with 502 (UnknownIssuer)"]
 async fn mitm_http2_serves_intact() {
     assert_mitm(false).await;
 }
@@ -204,7 +213,9 @@ async fn assert_mitm(http1_only: bool) {
     install_crypto_provider();
     let server = spawn_tls_server(&[b"h2", b"http/1.1"]).await;
     let config = TempDir::new().unwrap();
-    let (proxy, _daemon) = start_sieve(&config, &[]).await;
+    let ca_args = upstream_ca_args(&config, &server);
+    let ca_args: Vec<&str> = ca_args.iter().map(String::as_str).collect();
+    let (proxy, _daemon) = start_sieve(&config, &ca_args).await;
 
     let client = client_through(proxy, exported_ca(&config), http1_only);
     let res = client.get(server.url("/hello")).send().await.unwrap();
@@ -222,12 +233,11 @@ async fn assert_mitm(http1_only: bool) {
 }
 
 #[tokio::test]
-#[ignore = "bug: tracing writes to stdout, so stderr never receives the request log"]
 async fn request_log_goes_to_stderr() {
     install_crypto_provider();
     let server = spawn_tls_server(&[b"http/1.1"]).await;
     let config = TempDir::new().unwrap();
-    let (proxy, daemon) = start_sieve(&config, &["--passthrough", "127.0.0.1"]).await;
+    let (proxy, mut daemon) = start_sieve(&config, &["--passthrough", "127.0.0.1"]).await;
 
     let root = Certificate::from_der(&server.ca_der).unwrap();
     let client = client_through(proxy, root, true);
