@@ -138,6 +138,12 @@ impl ScriptEngine {
         self.scripts.is_empty()
     }
 
+    /// Whether any loaded script defines `on_response`, so a caller can skip
+    /// buffering a response body when nothing would use it.
+    pub fn has_on_response(&self) -> bool {
+        self.scripts.iter().any(|s| s.on_response)
+    }
+
     /// Runs every `on_request` hook against `req`, rewriting it in place.
     /// Stops at the first script that asks to respond directly.
     pub fn on_request(&self, req: &mut Request) -> Result<RequestOutcome> {

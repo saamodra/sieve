@@ -17,7 +17,11 @@ use super::{
     capture::{CaptureBody, Exchange, Side},
     strip_hop_by_hop, text_response, upstream_failed,
 };
-use crate::rules::{Decision, HeldRequest, Plan, RequestEdit, RequestInfo, RuleEngine};
+use crate::{
+    flow,
+    rules::{Decision, HeldRequest, Plan, RequestEdit, RequestInfo, RuleEngine},
+    script::{RequestOutcome, ScriptEngine},
+};
 
 /// The plan for `req`, or `None` when no rule applies to it.
 pub(super) fn plan_for(conn: &Conn, req: &Request<Incoming>, uri: &Uri) -> Option<Plan> {
@@ -309,6 +313,178 @@ pub(super) fn edit_response(parts: &mut response::Parts, plan: &Plan) -> Option<
         .headers
         .insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
     Some(body)
+}
+
+/// Runs `scripts` (rhai plugins, phase 5e) against a request that no
+/// declarative rule already answered, then forwards it.
+pub(super) async fn forward_with_scripts(
+    conn: &Conn,
+    mut parts: Parts,
+    body: Incoming,
+    exchange: Arc<Exchange>,
+    client_version: Version,
+    scripts: Arc<ScriptEngine>,
+) -> Response<ProxyBody> {
+    let mut bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            let message = format!("reading the request body failed: {e}");
+            exchange.finish(None, Some(message.clone()));
+            return text_response(StatusCode::BAD_REQUEST, &message);
+        }
+    };
+
+    let mut freq = flow_request_from(&parts, &bytes);
+    let outcome = match scripts.on_request(&mut freq) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            warn!("script on_request failed, forwarding the request unmodified: {e:#}");
+            RequestOutcome::Forward
+        }
+    };
+    if let RequestOutcome::Respond(fres) = outcome {
+        let _ = CaptureBody::new(Full::new(bytes), Side::Request, exchange.clone())
+            .collect()
+            .await;
+        return script_response(&fres, exchange, client_version);
+    }
+    apply_flow_request(&freq, &mut parts, &mut bytes);
+    exchange.update_request(parts.method.as_str(), parts.uri.to_string(), &parts.headers);
+
+    let out_body =
+        CaptureBody::new(Full::new(bytes), Side::Request, exchange.clone()).boxed_unsync();
+    let res = match conn
+        .shared
+        .client
+        .request(Request::from_parts(parts, out_body))
+        .await
+    {
+        Ok(res) => res,
+        Err(e) => return upstream_failed(&exchange, &e),
+    };
+
+    if !scripts.has_on_response() {
+        return super::respond(res, exchange, client_version, None);
+    }
+
+    let (mut res_parts, res_body) = res.into_parts();
+    let mut res_bytes = match res_body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            let message = format!("reading the response body failed: {e}");
+            exchange.finish(None, Some(message.clone()));
+            return text_response(StatusCode::BAD_GATEWAY, &message);
+        }
+    };
+    let mut fres = flow_response_from(&res_parts, &res_bytes);
+    if let Err(e) = scripts.on_response(&freq, &mut fres) {
+        warn!("script on_response failed, leaving the response unmodified: {e:#}");
+    }
+    apply_flow_response(&fres, &mut res_parts, &mut res_bytes);
+    exchange.set_response(
+        res_parts.status.as_u16(),
+        res_parts.version,
+        &res_parts.headers,
+    );
+    strip_hop_by_hop(&mut res_parts.headers, false);
+    res_parts.version = client_version;
+    let out_body = CaptureBody::new(Full::new(res_bytes), Side::Response, exchange).boxed_unsync();
+    Response::from_parts(res_parts, out_body)
+}
+
+fn flow_request_from(parts: &Parts, body: &Bytes) -> flow::Request {
+    flow::Request {
+        method: parts.method.to_string(),
+        url: parts.uri.to_string(),
+        http_version: "HTTP/1.1".to_string(),
+        headers: header_pairs(&parts.headers),
+        body: flow::Body {
+            raw: body.clone(),
+            size: body.len() as u64,
+            ..Default::default()
+        },
+    }
+}
+
+fn flow_response_from(parts: &response::Parts, body: &Bytes) -> flow::Response {
+    flow::Response {
+        status: parts.status.as_u16(),
+        http_version: "HTTP/1.1".to_string(),
+        headers: header_pairs(&parts.headers),
+        body: flow::Body {
+            raw: body.clone(),
+            size: body.len() as u64,
+            ..Default::default()
+        },
+    }
+}
+
+/// Copies a script's (possibly rewritten) request back into the parts and
+/// body bytes that get forwarded.
+fn apply_flow_request(freq: &flow::Request, parts: &mut Parts, bytes: &mut Bytes) {
+    if let Ok(method) = Method::from_bytes(freq.method.as_bytes()) {
+        parts.method = method;
+    }
+    if let Ok(uri) = freq.url.parse::<Uri>()
+        && uri.scheme().is_some()
+        && uri.authority().is_some()
+    {
+        parts.uri = uri;
+    }
+    parts.headers = headers_from_pairs(&freq.headers);
+    *bytes = freq.body.raw.clone();
+    if parts.headers.contains_key(header::CONTENT_LENGTH) {
+        parts
+            .headers
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
+    }
+}
+
+/// Copies a script's (possibly rewritten) response back into the parts and
+/// body bytes returned to the client.
+fn apply_flow_response(fres: &flow::Response, parts: &mut response::Parts, bytes: &mut Bytes) {
+    if let Ok(status) = StatusCode::from_u16(fres.status) {
+        parts.status = status;
+    }
+    parts.headers = headers_from_pairs(&fres.headers);
+    *bytes = fres.body.raw.clone();
+    parts.headers.remove(header::CONTENT_ENCODING);
+    parts.headers.remove(header::TRANSFER_ENCODING);
+    parts
+        .headers
+        .insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
+}
+
+fn headers_from_pairs(pairs: &[(String, String)]) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for (name, value) in pairs {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.trim().as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            headers.append(name, value);
+        }
+    }
+    headers
+}
+
+/// A response made directly by a script's `respond`.
+fn script_response(
+    fres: &flow::Response,
+    exchange: Arc<Exchange>,
+    client_version: Version,
+) -> Response<ProxyBody> {
+    let mut headers = headers_from_pairs(&fres.headers);
+    let status = StatusCode::from_u16(fres.status).unwrap_or(StatusCode::OK);
+    let body = fres.body.raw.clone();
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
+    exchange.set_response(status.as_u16(), Version::HTTP_11, &headers);
+    let mut res =
+        Response::new(CaptureBody::new(Full::new(body), Side::Response, exchange).boxed_unsync());
+    *res.status_mut() = status;
+    *res.headers_mut() = headers;
+    *res.version_mut() = client_version;
+    res
 }
 
 #[cfg(test)]

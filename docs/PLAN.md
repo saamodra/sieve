@@ -214,7 +214,7 @@ This phase is done as needed; each part stands alone, so the order is free.
 **5e. Extras**
 
 - [x] HAR export/import, request replay, diff of two responses. (API only: `GET/POST /api/har`, `POST /api/flows/{id}/replay`, `GET /api/diff?a=&b=`; no UI controls yet.)
-- [x] Scripting plugins (e.g. with `rhai`) for custom rules. (`sieve_core::script`; the proxy does not call it until the 5a rules engine lands.)
+- [x] Scripting plugins (e.g. with `rhai`) for custom rules. (`sieve_core::script`, loaded from `scripts_dir()` and wired into the proxy: it runs on requests that no declarative rule already answered. Combining a rule and a script on the same request is not supported yet.)
 
 ## Testing, risks & pitfalls
 

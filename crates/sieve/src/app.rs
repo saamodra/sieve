@@ -3,7 +3,9 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context as _, Result};
-use sieve_core::{CertAuthority, Config, Paths, flow, proxy, rules::RuleEngine};
+use sieve_core::{
+    CertAuthority, Config, Paths, flow, proxy, rules::RuleEngine, script::ScriptEngine,
+};
 use sieve_device::ios_device::{self, SetupContext};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -71,18 +73,27 @@ pub async fn run_session(
         }
     };
 
+    let mut scripts = ScriptEngine::new();
+    match scripts.load_dir(&ctx.paths.scripts_dir()) {
+        Ok(0) => {}
+        Ok(n) => info!(n, "loaded scripting plugins"),
+        Err(e) => warn!("ignoring the scripts directory: {e:#}"),
+    }
+    let scripts = Arc::new(scripts);
+
     info!(
         proxy = %ctx.config.proxy.listen,
         ui = %format!("http://{}", ctx.config.ui.listen),
         "sieve running",
     );
     let result = tokio::try_join!(
-        proxy::run_with_rules(
+        proxy::run_with_rules_and_scripts(
             ctx.config.proxy.clone(),
             ca,
             flows.clone(),
             shutdown.clone(),
             Some(rules.clone()),
+            Some(scripts),
         ),
         sieve_ui::serve_with_rules(
             ctx.config.ui.clone(),

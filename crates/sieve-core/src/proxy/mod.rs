@@ -53,6 +53,7 @@ use crate::{
     config::ProxyConfig,
     flow::{FlowId, FlowKind, FlowSender},
     rules::{Plan, RuleEngine},
+    script::ScriptEngine,
 };
 
 pub(crate) type BoxError = Box<dyn StdError + Send + Sync>;
@@ -91,6 +92,30 @@ pub async fn run_with_rules(
     proxy.serve(listener, shutdown).await
 }
 
+/// Like [`run_with_rules`], also running `scripts` (rhai plugins, phase 5e)
+/// on requests that no declarative rule already answered.
+pub async fn run_with_rules_and_scripts(
+    config: ProxyConfig,
+    ca: Arc<CertAuthority>,
+    flows: FlowSender,
+    shutdown: CancellationToken,
+    rules: Option<Arc<RuleEngine>>,
+    scripts: Option<Arc<ScriptEngine>>,
+) -> Result<()> {
+    let listener = TcpListener::bind(config.listen)
+        .await
+        .with_context(|| format!("binding the proxy to {}", config.listen))?;
+    let mut proxy = Proxy::new(config, ca, flows);
+    proxy.rules = rules;
+    proxy.scripts = scripts;
+    for path in proxy.config.upstream_ca_files.clone() {
+        for cert in load_pem_certs(&path)? {
+            proxy = proxy.trust_upstream_root(cert.to_vec());
+        }
+    }
+    proxy.serve(listener, shutdown).await
+}
+
 /// Reads every certificate from a PEM file, failing if there is none.
 fn load_pem_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
     let certs = CertificateDer::pem_file_iter(path)
@@ -113,6 +138,7 @@ pub struct Proxy {
     flows: FlowSender,
     upstream_roots: Vec<CertificateDer<'static>>,
     rules: Option<Arc<RuleEngine>>,
+    scripts: Option<Arc<ScriptEngine>>,
 }
 
 impl Proxy {
@@ -123,12 +149,20 @@ impl Proxy {
             flows,
             upstream_roots: Vec::new(),
             rules: None,
+            scripts: None,
         }
     }
 
     /// Applies `rules` (rewrites, mocks, breakpoints) to intercepted requests.
     pub fn with_rules(mut self, rules: Arc<RuleEngine>) -> Self {
         self.rules = Some(rules);
+        self
+    }
+
+    /// Runs `scripts` (rhai plugins) on requests that no declarative rule
+    /// already answered.
+    pub fn with_scripts(mut self, scripts: Arc<ScriptEngine>) -> Self {
+        self.scripts = Some(scripts);
         self
     }
 
@@ -150,6 +184,7 @@ impl Proxy {
             ca: self.ca,
             flows: self.flows,
             rules: self.rules,
+            scripts: self.scripts,
             muted: broadcast::channel(1).0,
             next_id: AtomicU64::new(1),
             shutdown: shutdown.clone(),
@@ -208,6 +243,7 @@ struct Shared {
     ca: Arc<CertAuthority>,
     flows: FlowSender,
     rules: Option<Arc<RuleEngine>>,
+    scripts: Option<Arc<ScriptEngine>>,
     /// Has no receivers; flows from quiet connections go here and vanish.
     muted: FlowSender,
     client: UpstreamClient,
@@ -368,6 +404,18 @@ impl Conn {
         parts.headers.remove(header::HOST);
         if let Some(plan) = plan {
             return rules::forward(self, parts, body, exchange, client_version, plan).await;
+        }
+        // No declarative rule matched; scripting plugins get a turn instead.
+        if let Some(scripts) = self.shared.scripts.clone().filter(|s| !s.is_empty()) {
+            return rules::forward_with_scripts(
+                self,
+                parts,
+                body,
+                exchange,
+                client_version,
+                scripts,
+            )
+            .await;
         }
         let body = CaptureBody::new(body, Side::Request, exchange.clone()).boxed_unsync();
 

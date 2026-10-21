@@ -74,6 +74,11 @@ impl Paths {
     pub fn state_dir(&self) -> PathBuf {
         self.config_dir.join("state")
     }
+
+    /// Directory of `*.rhai` scripting plugins, loaded at startup.
+    pub fn scripts_dir(&self) -> PathBuf {
+        self.config_dir.join("scripts")
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
