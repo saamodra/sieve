@@ -1,6 +1,6 @@
 //! Serves the web UI with a stream of synthetic flows, no proxy needed.
 //!
-//! `cargo run -p sieve-ui --example demo [-- 127.0.0.1:8081]`
+//! `cargo run -p sieve-ui --example demo [-- 127.0.0.1:8731]`
 
 use std::{sync::Arc, time::Duration};
 
@@ -178,7 +178,7 @@ fn synthetic(id: u64, rng: &mut Rng) -> Flow {
 async fn main() -> anyhow::Result<()> {
     let listen = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "127.0.0.1:8081".into())
+        .unwrap_or_else(|| "127.0.0.1:8731".into())
         .parse()?;
     let tx = flow::channel();
     let shutdown = CancellationToken::new();

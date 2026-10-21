@@ -108,7 +108,7 @@ fn upstream_ca_args(config_dir: &TempDir, server: &TlsServer) -> Vec<String> {
 
 /// Starts `sieve start` on a fresh proxy port with its config in a tempdir,
 /// and waits until the proxy accepts connections. The web UI gets a free port
-/// too, so the default 8081 is never touched; it does not listen yet
+/// too, so the default 8731 is never touched; it does not listen yet
 /// (`sieve-ui` is still a stub), so the proxy is the only port waited on.
 async fn start_sieve(config_dir: &TempDir, extra: &[&str]) -> (SocketAddr, Daemon) {
     let proxy = free_addr();

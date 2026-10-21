@@ -44,7 +44,7 @@ Start the proxy and the web UI:
 sieve start
 ```
 
-By default the proxy listens on `127.0.0.1:8080` and the web UI on `http://localhost:8081`. Both addresses can be changed with `--listen` and `--ui-listen`, and `--passthrough <HOST>` tunnels a host without intercepting it. `--upstream-ca <PEM>` (repeatable, or `upstream_ca_files` under `[proxy]` in `config.toml`) trusts extra roots when verifying upstream servers, such as a local backend with its own CA. Requests appear in the web UI as they arrive.
+By default the proxy listens on `127.0.0.1:8730` and the web UI on `http://localhost:8731`. Both addresses can be changed with `--listen` and `--ui-listen`, and `--passthrough <HOST>` tunnels a host without intercepting it. `--upstream-ca <PEM>` (repeatable, or `upstream_ca_files` under `[proxy]` in `config.toml`) trusts extra roots when verifying upstream servers, such as a local backend with its own CA. Requests appear in the web UI as they arrive.
 
 To trust the CA on a device, export it:
 
@@ -60,7 +60,7 @@ Each platform has its own setup command. Run `sieve --help` or `sieve <command> 
 
 ### Android, mode 1 (no root, your own debug app)
 
-`sieve android setup` routes the device through sieve over USB. It runs `adb reverse` so the device can reach the proxy on `127.0.0.1:8080`, sets the device's `http_proxy` to the proxy, and starts the proxy. Use `--serial <SERIAL>` when more than one device is connected; serials are listed by `adb devices`.
+`sieve android setup` routes the device through sieve over USB. It runs `adb reverse` so the device can reach the proxy on `127.0.0.1:8730`, sets the device's `http_proxy` to the proxy, and starts the proxy. Use `--serial <SERIAL>` when more than one device is connected; serials are listed by `adb devices`.
 
 Install the CA on the device once, through Settings, Security, Install certificate. The setup command pushes the file to `/sdcard/Download/sieve-ca.crt`.
 

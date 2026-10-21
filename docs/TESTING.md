@@ -12,7 +12,7 @@ cargo build --release
 alias sieve="$PWD/target/release/sieve"
 ```
 
-If you skip the `ui/` build, everything still works, but `http://localhost:8081` shows a "web UI has not been built" page instead of the traffic view.
+If you skip the `ui/` build, everything still works, but `http://localhost:8731` shows a "web UI has not been built" page instead of the traffic view.
 
 The CA lives in `~/Library/Application Support/sieve/` (`sieve ca path` prints it). To test against a throwaway CA and config, prefix commands with `SIEVE_CONFIG_DIR=$(mktemp -d)`; devices then need that CA instead.
 
@@ -28,14 +28,14 @@ Terminal 2:
 
 ```sh
 CA="$(sieve ca path | head -1)"
-curl -x http://127.0.0.1:8080 --cacert "$CA" https://example.com -o /dev/null -w '%{http_code} %{http_version}\n'
-curl -x http://127.0.0.1:8080 --cacert "$CA" --http1.1 https://example.com -o /dev/null -w '%{http_code} %{http_version}\n'
-curl -x http://127.0.0.1:8080 --cacert "$CA" -H 'Accept-Encoding: gzip' https://httpbin.org/gzip -o /dev/null
-curl -x http://127.0.0.1:8080 http://example.com -o /dev/null      # plain HTTP
+curl -x http://127.0.0.1:8730 --cacert "$CA" https://example.com -o /dev/null -w '%{http_code} %{http_version}\n'
+curl -x http://127.0.0.1:8730 --cacert "$CA" --http1.1 https://example.com -o /dev/null -w '%{http_code} %{http_version}\n'
+curl -x http://127.0.0.1:8730 --cacert "$CA" -H 'Accept-Encoding: gzip' https://httpbin.org/gzip -o /dev/null
+curl -x http://127.0.0.1:8730 http://example.com -o /dev/null      # plain HTTP
 sieve ca info                                                      # fingerprint, validity, paths
 ```
 
-Open http://localhost:8081 and check:
+Open http://localhost:8731 and check:
 
 - Each request appears live, with method, host, path, status, size, and duration.
 - Clicking a row shows headers, the response body (the gzip one is shown decoded), and timing.
@@ -54,7 +54,7 @@ SPKI=$(openssl x509 -in "$(sieve ca path | head -1)" -pubkey -noout \
   | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64)
 open -na "Google Chrome" --args \
   --user-data-dir=/tmp/sieve-chrome \
-  --proxy-server=127.0.0.1:8080 \
+  --proxy-server=127.0.0.1:8730 \
   --ignore-certificate-errors-spki-list="$SPKI" \
   https://example.com
 ```
@@ -63,7 +63,7 @@ The same flags work for Brave (`open -na "Brave Browser" ...`). Chrome shows an 
 
 Browse a few HTTP/2 sites. There should be no certificate warnings, and the traffic shows up in the UI. Chrome's own background traffic (to `google.com`, `gstatic.com`, and so on) shows up too.
 
-**Safari, or Chrome in your normal profile**, use the Mac's system proxy and keychain instead. Trust the CA in the login keychain, then set the proxy in System Settings > Network > (your service) > Details > Proxies, for both "Web proxy" and "Secure web proxy", pointing at `127.0.0.1:8080`:
+**Safari, or Chrome in your normal profile**, use the Mac's system proxy and keychain instead. Trust the CA in the login keychain, then set the proxy in System Settings > Network > (your service) > Details > Proxies, for both "Web proxy" and "Secure web proxy", pointing at `127.0.0.1:8730`:
 
 ```sh
 security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db "$CA"
@@ -156,7 +156,7 @@ On the iPhone:
 1. Scan the QR code with the Camera and open the page in **Safari** (profiles only download from Safari).
 2. Tap the profile download. Then go to Settings > General > VPN & Device Management, install "sieve". It shows as "Not Verified", which is normal for an unsigned profile.
 3. Go to Settings > General > About > Certificate Trust Settings and turn on full trust for the sieve CA. **This is the step people forget**: without it, the profile is installed but HTTPS still fails.
-4. Go to Settings > Wi-Fi > (i) next to your network > Configure Proxy > Automatic, and enter the PAC URL from the setup page (`http://<mac-ip>:8081/proxy.pac`).
+4. Go to Settings > Wi-Fi > (i) next to your network > Configure Proxy > Automatic, and enter the PAC URL from the setup page (`http://<mac-ip>:8731/proxy.pac`).
 5. Open https://example.com in Safari. The setup page's status turns into a green check, and the traffic shows up in the UI.
 
 Undo it: set Configure Proxy back to Off, and remove the profile under VPN & Device Management.

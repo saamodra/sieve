@@ -107,7 +107,7 @@ pub struct ProxyConfig {
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
-            listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 8080)),
+            listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 8730)),
             passthrough_hosts: Vec::new(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             upstream_ca_files: Vec::new(),
@@ -127,7 +127,7 @@ pub struct UiConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 8081)),
+            listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 8731)),
             token: None,
         }
     }

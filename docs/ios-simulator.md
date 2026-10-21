@@ -42,10 +42,10 @@ let config = URLSessionConfiguration.default
 config.connectionProxyDictionary = [
     "HTTPEnable": 1,
     "HTTPProxy": "127.0.0.1",
-    "HTTPPort": 8080,
+    "HTTPPort": 8730,
     "HTTPSEnable": 1,
     "HTTPSProxy": "127.0.0.1",
-    "HTTPSPort": 8080,
+    "HTTPSPort": 8730,
 ]
 let session = URLSession(configuration: config)
 ```

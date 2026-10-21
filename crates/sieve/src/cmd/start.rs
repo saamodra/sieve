@@ -9,10 +9,10 @@ use crate::app::{self, Context};
 
 #[derive(Args)]
 pub struct StartArgs {
-    /// Proxy listen address [default: from config, 127.0.0.1:8080].
+    /// Proxy listen address [default: from config, 127.0.0.1:8730].
     #[arg(long)]
     listen: Option<SocketAddr>,
-    /// Web UI listen address [default: from config, 127.0.0.1:8081].
+    /// Web UI listen address [default: from config, 127.0.0.1:8731].
     #[arg(long)]
     ui_listen: Option<SocketAddr>,
     /// Tunnel this host without interception. Repeatable; `*.example.com`
