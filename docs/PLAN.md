@@ -164,12 +164,12 @@ Outcome of this phase: a real iPhone can be set up by scanning a QR code, and an
 
 **Physical iOS device (semi-automatic)**
 
-- [ ] Proxy listens on the LAN IP (opt-in), with automatic detection of the Mac's Wi-Fi IP.
-- [ ] `/setup/ios.mobileconfig` endpoint containing a `com.apple.security.root` payload with the CA. The profile does not need to be signed for v1 (it shows as "Not Verified", which is normal).
-- [ ] `/proxy.pac` endpoint that routes all traffic to `PROXY <mac-ip>:8080; DIRECT`.
-- [ ] `sieve ios-device setup` shows a QR code in the terminal (`qrcode` crate) pointing at the `/setup/ios` page, which has a profile download button and short steps.
-- [ ] Manual steps on the iPhone: install the profile, enable it under Settings > General > About > Certificate Trust Settings, set the Wi-Fi proxy to Automatic with the PAC URL.
-- [ ] The setup page can check status: once requests from the iPhone come through HTTPS without errors, show a green check mark.
+- [x] Proxy listens on the LAN IP (opt-in), with automatic detection of the Mac's Wi-Fi IP.
+- [x] `/setup/ios.mobileconfig` endpoint containing a `com.apple.security.root` payload with the CA. The profile does not need to be signed for v1 (it shows as "Not Verified", which is normal).
+- [x] `/proxy.pac` endpoint that routes all traffic to `PROXY <mac-ip>:8080; DIRECT`.
+- [x] `sieve ios-device setup` shows a QR code in the terminal (`qrcode` crate) pointing at the `/setup/ios` page, which has a profile download button and short steps.
+- [x] Manual steps on the iPhone: install the profile, enable it under Settings > General > About > Certificate Trust Settings, set the Wi-Fi proxy to Automatic with the PAC URL.
+- [x] The setup page can check status: once requests from the iPhone come through HTTPS without errors, show a green check mark.
 
 **Android mode 2 (Google APIs emulator or rooted device)**
 
