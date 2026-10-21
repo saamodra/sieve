@@ -6,9 +6,7 @@ sieve is an HTTP and HTTPS debug proxy for Android and iOS, written in Rust. It 
 
 sieve is pre-alpha and built in phases. The full plan, with a checklist for each phase, is in [docs/PLAN.md](docs/PLAN.md).
 
-The repository currently contains the Phase 0 skeleton. The CLI parses every command listed below, but most of them are not implemented yet and exit with a `not implemented yet (phase N)` error. The phase number in that message refers to the plan. Phase 0 is complete; the certificate authority, the proxy, the web UI, and the device setup commands are not.
-
-Behavior described in this README is the target design unless it is marked as implemented. Anything marked as planned depends on a later phase and does not work yet.
+Phases 0 to 4 are implemented: the certificate authority, the proxy (HTTP/1.1, HTTP/2, WebSocket), the web UI, and device setup for Android (modes 1 and 2), the iOS Simulator, and physical iPhones. Device setup has not yet been verified on real devices; [docs/TESTING.md](docs/TESTING.md) is the manual test guide. Phase 5 (rules, breakpoints, Frida, VPN mode) is not started.
 
 ## Build from source
 
@@ -24,7 +22,7 @@ The binary is written to `target/release/sieve`. You can also run it without ins
 cargo run -q -- --help
 ```
 
-The web UI lives in `ui/`, which is a Svelte and Vite project. Building it requires Node.js and npm. The UI is planned for Phase 3, and `ui/` does not contain the frontend yet. Once it does, build it with:
+The web UI lives in `ui/`, which is a Svelte and Vite project. Building it requires Node.js and npm. Build it before `cargo build` so its assets are embedded in the binary:
 
 ```sh
 cd ui
@@ -40,7 +38,7 @@ sieve keeps its root certificate authority in its config directory. Print the lo
 sieve ca path
 ```
 
-Start the proxy and the web UI (planned, Phase 1b and Phase 3):
+Start the proxy and the web UI:
 
 ```sh
 sieve start
@@ -48,7 +46,7 @@ sieve start
 
 By default the proxy listens on `127.0.0.1:8080` and the web UI on `http://localhost:8081`. Both addresses can be changed with `--listen` and `--ui-listen`, and `--passthrough <HOST>` tunnels a host without intercepting it. `--upstream-ca <PEM>` (repeatable, or `upstream_ca_files` under `[proxy]` in `config.toml`) trusts extra roots when verifying upstream servers, such as a local backend with its own CA. Requests appear in the web UI as they arrive.
 
-To trust the CA on a device, export it (planned, Phase 1a):
+To trust the CA on a device, export it:
 
 ```sh
 sieve ca export --format pem -o sieve-ca.pem
@@ -64,7 +62,7 @@ Each platform has its own setup command. Run `sieve --help` or `sieve <command> 
 
 `sieve android setup` routes the device through sieve over USB. It runs `adb reverse` so the device can reach the proxy on `127.0.0.1:8080`, sets the device's `http_proxy` to the proxy, and starts the proxy. Use `--serial <SERIAL>` when more than one device is connected; serials are listed by `adb devices`.
 
-Install the CA on the device once, through Settings, Security, Install certificate. The setup command pushes the file to `/sdcard/Download/sieve-ca.crt` (planned).
+Install the CA on the device once, through Settings, Security, Install certificate. The setup command pushes the file to `/sdcard/Download/sieve-ca.crt`.
 
 Apps that target Android 7 or later do not trust user-installed certificates unless they opt in. For debug builds of your own app, `sieve android nsc` prints a `network_security_config.xml` snippet with a `debug-overrides` block that trusts user certificates, and the manifest line to add. Use it only for builds you control.
 
@@ -72,7 +70,7 @@ Run `sieve android teardown` when you are done. It clears `http_proxy` and remov
 
 ### Android, mode 2 (emulator or rooted device)
 
-`sieve android inject-ca` installs the CA into the system certificate store, so apps that trust the system store will accept it without changes to their code. It requires either a Google APIs emulator image or a rooted device, because the store is not writable otherwise. Google Play images do not allow `adb root`. Injection is not persistent: it is lost on reboot, so run the command again after a restart (planned, Phase 4).
+`sieve android inject-ca` installs the CA into the system certificate store, so apps that trust the system store will accept it without changes to their code. It requires either a Google APIs emulator image or a rooted device, because the store is not writable otherwise. Google Play images do not allow `adb root`. Injection is not persistent: it is lost on reboot, so run the command again after a restart.
 
 ### iOS Simulator (macOS only)
 
@@ -86,7 +84,7 @@ Run `sieve android teardown` when you are done. It clears `http_proxy` and remov
 2. Enable it under Settings, General, About, Certificate Trust Settings. The profile has no effect on HTTPS until this step is done.
 3. Set the Wi-Fi proxy to Automatic and enter the proxy auto-configuration URL shown on the setup page.
 
-The setup page can check whether traffic from the phone is arriving (planned). The phone and the Mac must be on the same network. Both the QR setup and the profile are planned, Phase 4.
+The setup page shows a green check once HTTPS traffic from the phone arrives. The phone and the Mac must be on the same network.
 
 ## Reset if something is left behind
 
@@ -117,7 +115,7 @@ sieve also saves the proxy settings it replaces. To restore them from that saved
 sieve doctor --restore
 ```
 
-`sieve doctor --restore` restores system proxy settings saved by a setup that did not tear down (planned, Phase 2). Use the manual commands above if it is not available or does not restore the settings you expect.
+`sieve doctor --restore` restores system proxy settings saved by a setup that did not tear down. Use the manual commands above if it is not available or does not restore the settings you expect.
 
 ## Troubleshooting
 
@@ -133,7 +131,7 @@ sieve doctor --restore
 
 **Flutter apps ignore the system proxy.** Flutter's networking stack does not use the system proxy or the operating system certificate store. Traffic from a Flutter app does not appear in sieve unless the app is configured to use the proxy in its Dart code during debugging, or a Frida-based approach is used (planned, Phase 5).
 
-**Leaf certificates without a SAN.** Modern operating systems reject a leaf certificate that has no Subject Alternative Name, even when the Common Name matches. sieve issues leaf certificates with the host in the SAN (planned, Phase 1a).
+**Leaf certificates without a SAN.** Modern operating systems reject a leaf certificate that has no Subject Alternative Name, even when the Common Name matches. sieve issues leaf certificates with the host in the SAN.
 
 ## Responsible use
 
