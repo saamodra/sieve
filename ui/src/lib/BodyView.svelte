@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { decodeBase64, formatSize, hexDump, prettyJson } from './format';
+  import { copyText, decodeBase64, formatSize, hexDump, prettyJson } from './format';
   import JsonTree from './JsonTree.svelte';
   import type { BodyDetail } from './types';
 
@@ -28,6 +28,17 @@
     return m;
   });
 
+  let copied = $state(false);
+  async function copyBody() {
+    try {
+      await copyText(pretty ?? body.text ?? '');
+      copied = true;
+      setTimeout(() => (copied = false), 1200);
+    } catch {
+      copied = false;
+    }
+  }
+
   let chosen = $state<Mode | null>(null);
   const mode = $derived(modes.find(([k]) => k === chosen) ? chosen! : modes[0]![0]);
 
@@ -49,6 +60,9 @@
         <button onclick={() => fold(true)}>Expand all</button>
         <button onclick={() => fold(false)}>Collapse all</button>
       </div>
+    {/if}
+    {#if body.text !== null}
+      <div class="modes"><button onclick={copyBody}>{copied ? 'Copied' : 'Copy'}</button></div>
     {/if}
     <span class="meta">
       {body.content_type ?? 'unknown type'} · {formatSize(body.size)}
