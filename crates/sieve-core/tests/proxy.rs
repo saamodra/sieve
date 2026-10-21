@@ -622,3 +622,47 @@ async fn processes_in_intercept_processes_are_intercepted() {
     assert_eq!(flow.kind, FlowKind::Http);
     assert_eq!(flow.response.as_ref().unwrap().status, 200);
 }
+
+/// An upstream that accepts connections and never answers.
+async fn spawn_silent_upstream() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            let (tcp, _) = listener.accept().await.unwrap();
+            held.push(tcp);
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn a_request_the_client_cancels_becomes_a_flow_with_an_error() {
+    let upstream = spawn_silent_upstream().await;
+    let mut sieve = spawn_sieve(ProxyConfig::default(), None).await;
+
+    let url = format!("http://{upstream}/slow");
+    let mut tcp = TcpStream::connect(sieve.addr).await.unwrap();
+    let request = format!("GET {url} HTTP/1.1\r\nHost: {upstream}\r\n\r\n");
+    tcp.write_all(request.as_bytes()).await.unwrap();
+
+    // The flow is published once when the request arrives, still pending.
+    let started = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let flow = sieve.flows.recv().await.unwrap();
+            if flow.request.url == url {
+                return flow;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the request");
+    assert!(started.response.is_none() && started.error.is_none());
+
+    drop(tcp);
+    let flow = completed_flow(&mut sieve.flows, |f| f.id == started.id).await;
+    assert!(flow.response.is_none());
+    let error = flow.error.as_deref().unwrap();
+    assert!(error.contains("cancelled"), "{error}");
+}
