@@ -166,6 +166,11 @@
     drafts.splice(j, 0, item!);
   }
 
+  /** Sets the initial open state only; a bound `open` is reset by every keystroke re-render. */
+  function openOnce(node: HTMLDetailsElement, open: boolean) {
+    node.open = open;
+  }
+
   onMount(load);
 </script>
 
@@ -190,7 +195,7 @@
       </p>
     {/if}
     {#each drafts as d, i (i)}
-      <details class="rule" open={!d.id}>
+      <details class="rule" use:openOnce={!d.id}>
         <summary>
           <input type="checkbox" bind:checked={d.enabled} aria-label="Enabled" />
           <input class="name" bind:value={d.name} aria-label="Rule name" />
