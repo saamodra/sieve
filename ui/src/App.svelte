@@ -48,7 +48,8 @@
     capture.version;
     const terms = text.toLowerCase().split(/\s+/).filter(Boolean);
     const any = terms.length || method || status || client;
-    if (!any) return capture.rows;
+    // Copy: capture.rows is mutated in place, and an identical reference would not notify FlowTable.
+    if (!any) return capture.rows.slice();
     return capture.rows.filter(
       (r) =>
         (!method || r.method === method) &&
