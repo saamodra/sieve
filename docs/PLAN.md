@@ -208,8 +208,8 @@ This phase is done as needed; each part stands alone, so the order is free.
 
 **5d. VPN mode (largest, last)**
 
-- [ ] Android: Kotlin companion app with `VpnService` that forwards TCP to the proxy. Reference: HTTP Toolkit's Android app (open source).
-- [ ] iOS: an app with NetworkExtension (Packet Tunnel or App Proxy). Requires a paid Apple Developer account.
+- [x] Android: Kotlin companion app with `VpnService` that forwards TCP to the proxy. Reference: HTTP Toolkit's Android app (open source). Lives in `android-vpn/`; `sieve android vpn` does the host side. Built and unit-tested on the JVM; not yet run on a device.
+- [ ] ~~iOS: an app with NetworkExtension (Packet Tunnel or App Proxy). Requires a paid Apple Developer account.~~ Skipped: no paid Apple Developer account is available.
 
 **5e. Extras**
 
