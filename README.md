@@ -74,7 +74,7 @@ Run `sieve android teardown` when you are done. It clears `http_proxy` and remov
 
 ### iOS Simulator (macOS only)
 
-`sieve ios-sim setup` trusts the CA in every booted Simulator, sets the Mac's system web proxy and secure web proxy on the active network service, and starts the proxy. The Mac system proxy applies to the whole machine, not only to the Simulator, so traffic from every app on the Mac goes through sieve while it runs. The previous proxy settings are saved and restored by `sieve ios-sim teardown`. If the restore does not happen, see [Reset if something is left behind](#reset-if-something-is-left-behind).
+`sieve ios-sim setup` trusts the CA in every booted Simulator, sets the Mac's system web proxy and secure web proxy on the active network service, and starts the proxy. The Mac system proxy applies to the whole machine, so every app on the Mac sends its traffic through sieve while it runs, but only connections from inside the Simulator are intercepted. The Mac's own apps are tunneled untouched and keep working; pass `--intercept-mac` to intercept them too. The previous proxy settings are saved and restored by `sieve ios-sim teardown`. If the restore does not happen, see [Reset if something is left behind](#reset-if-something-is-left-behind).
 
 ### Physical iPhone
 

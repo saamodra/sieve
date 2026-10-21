@@ -118,7 +118,7 @@ Open Chrome **and an app with no network security config** (any app you're allow
 
 ## 4. iOS Simulator (phase 2)
 
-> This changes the **whole Mac's** web proxy while it runs. Ctrl+C restores it. If sieve is killed (`kill -9`, crash, or lost power), run `sieve doctor --restore`.
+> This changes the **whole Mac's** web proxy while it runs. Only Simulator traffic is intercepted; the Mac's own apps are tunneled untouched, so they keep working. Ctrl+C, `kill`, or closing the terminal restores the proxy. If sieve dies without a chance to clean up (`kill -9`, a crash, or lost power), run `sieve doctor --restore`.
 
 ```sh
 open -a Simulator                       # boot any iPhone simulator
@@ -126,14 +126,16 @@ networksetup -getwebproxy "USB 10/100 LAN"   # note the "before" state (use your
 sieve ios-sim setup
 ```
 
-In the Simulator, open https://example.com in Safari, plus a sample URLSession app if you have one. The traffic shows up in the UI, with no certificate warning. Press Ctrl+C, then:
+In the Simulator, open https://example.com in Safari, plus a sample URLSession app if you have one. The traffic shows up in the UI, with no certificate warning. If a site you visited just before setup doesn't show up, Safari is reusing an old direct connection: open a different site or relaunch Safari.
+
+Meanwhile, use the Mac normally: browsing in Safari or Chrome on the Mac keeps working, and none of it appears in the UI. Press Ctrl+C, then:
 
 ```sh
 networksetup -getwebproxy "USB 10/100 LAN"   # back to the "before" state
 sieve doctor                                 # reports nothing left over
 ```
 
-To test crash recovery, run `sieve ios-sim setup`, `kill -9` it from another terminal, and check that `sieve doctor` reports the leftover state and `sieve doctor --restore` fixes it.
+Closing the terminal tab, or `kill <pid>`, should restore the proxy the same way. To test crash recovery, run `sieve ios-sim setup`, `kill -9` it from another terminal, and check that `sieve doctor` reports the leftover state and `sieve doctor --restore` fixes it.
 
 If you'd rather not touch the Mac's proxy at all, see [ios-simulator.md](ios-simulator.md) for setting the proxy in your app's `URLSessionConfiguration` instead.
 
