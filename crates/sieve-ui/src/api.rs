@@ -22,9 +22,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sieve_core::{
     Flow, FlowSender,
-    config::DEFAULT_MAX_BODY_BYTES,
     flow::{FlowId, FlowKind},
-    proxy::replay,
+    proxy::replay::Replayer,
     rules::{Decision, HeldRequest, RequestEdit, Rule, RuleEngine, breakpoint::Outcome},
 };
 use time::OffsetDateTime;
@@ -66,6 +65,8 @@ pub struct ApiState {
     pub store: Arc<FlowStore>,
     pub events: broadcast::Sender<WsEvent>,
     pub rules: Option<Arc<RuleEngine>>,
+    /// Shared HTTP client for replays, built from the proxy's config.
+    pub replayer: Replayer,
     /// Where replayed and imported flows are published, so they reach the
     /// store and the live feed like any captured flow.
     pub flows: FlowSender,
@@ -292,7 +293,7 @@ async fn flow_replay(State(st): State<ApiState>, Path(id): Path<FlowId>) -> Resp
         return bad_request("only plain HTTP flows can be replayed");
     }
     let started_at = OffsetDateTime::now_utc();
-    let out = match replay::replay(&orig.request, REPLAY_TIMEOUT, DEFAULT_MAX_BODY_BYTES).await {
+    let out = match st.replayer.replay(&orig.request, REPLAY_TIMEOUT).await {
         Ok(o) => o,
         Err(e) => {
             let body = json!({"error": format!("{e:#}")});

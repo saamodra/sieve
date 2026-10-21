@@ -146,3 +146,42 @@ async fn replay_creates_a_new_flow() {
     let (status, _) = post_json(&h.app, "/api/flows/77/replay", &Value::Null).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn replay_uses_the_configured_body_limit() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 2048];
+        let _ = s.read(&mut buf).await.unwrap();
+        s.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789",
+        )
+        .await
+        .unwrap();
+    });
+
+    let tx = flow::channel();
+    let shutdown = CancellationToken::new();
+    let replayer = sieve_core::proxy::replay::Replayer::new(&[], 4).unwrap();
+    let app = crate::build_with_replayer(
+        &UiConfig::default(),
+        &tx,
+        Router::new(),
+        &shutdown,
+        None,
+        replayer,
+    )
+    .unwrap();
+    let h = Harness { app, tx, shutdown };
+    send(&h, [flow(1, "GET", &format!("http://{addr}/r"), Some(200))]).await;
+    let (status, out) = post_json(&h.app, "/api/flows/1/replay", &Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let new_id = out["id"].as_u64().unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let d = get_json(&h.app, &format!("/api/flows/{new_id}")).await;
+    assert_eq!(d["response"]["body"]["truncated"], true);
+    assert_eq!(d["response"]["body"]["text"], "0123");
+}
