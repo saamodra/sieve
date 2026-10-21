@@ -72,6 +72,10 @@ Run `sieve android teardown` when you are done. It clears `http_proxy` and remov
 
 `sieve android inject-ca` installs the CA into the system certificate store, so apps that trust the system store will accept it without changes to their code. It requires either a Google APIs emulator image or a rooted device, because the store is not writable otherwise. Google Play images do not allow `adb root`. Injection is not persistent: it is lost on reboot, so run the command again after a restart.
 
+### Android, VPN mode (apps that ignore the proxy)
+
+`sieve android vpn` pairs with the companion app in [`android-vpn/`](android-vpn/README.md), which captures all TCP on the device through a `VpnService` and forwards it to sieve. Use it for apps that bypass `http_proxy`. The command sets up `adb reverse`, pushes the CA, opens the app, and runs the proxy; build and install the app first (see its README). It has not yet been verified on a device. There is no iOS equivalent, because a NetworkExtension needs a paid Apple Developer account.
+
 ### iOS Simulator (macOS only)
 
 `sieve ios-sim setup` trusts the CA in every booted Simulator, sets the Mac's system web proxy and secure web proxy on the active network service, and starts the proxy. The Mac system proxy applies to the whole machine, so every app on the Mac sends its traffic through sieve while it runs, but only connections from inside the Simulator are intercepted. The Mac's own apps are tunneled untouched and keep working; pass `--intercept-mac` to intercept them too. The previous proxy settings are saved and restored by `sieve ios-sim teardown`. If the restore does not happen, see [Reset if something is left behind](#reset-if-something-is-left-behind).
