@@ -267,6 +267,20 @@ async fn curl_output() {
     assert!(text.contains("-H 'Accept: */*'"));
     assert!(!text.to_lowercase().contains("content-length"));
     assert!(text.contains("--data-raw 'it'\\''s'"));
+    assert!(!text.contains("--compressed"));
+}
+
+#[tokio::test]
+async fn curl_compressed_when_accept_encoding_sent() {
+    let h = loopback();
+    let mut f = flow(1, "GET", "https://a.test/", Some(200));
+    f.request
+        .headers
+        .push(("accept-encoding".into(), "gzip, br".into()));
+    send(&h, [f]).await;
+    let (_, body) = call(&h.app, "GET", "/api/flows/1/curl").await;
+    let text = String::from_utf8(body).unwrap();
+    assert!(text.contains("\n  --compressed"), "{text}");
 }
 
 #[tokio::test]
