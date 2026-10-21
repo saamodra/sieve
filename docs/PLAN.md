@@ -139,19 +139,19 @@ Outcome of this phase: open `http://localhost:8081` and traffic appears live, ca
 
 **Backend (`sieve-ui`, using `axum`)**
 
-- [ ] `GET /api/flows` (paging, filter by host/method/status) and `GET /api/flows/:id` (full detail + body).
-- [ ] `GET /api/ws` WebSocket that streams summaries of new flows from the broadcast channel.
-- [ ] `DELETE /api/flows` to clear, `GET /api/flows/:id/har` to export HAR, and a "copy as curl" endpoint.
-- [ ] Frontend assets are embedded into the binary with `rust-embed`, so it stays a single file.
-- [ ] Bind to `127.0.0.1` only by default; expose to the LAN only with an explicit flag.
+- [x] `GET /api/flows` (paging, filter by host/method/status) and `GET /api/flows/:id` (full detail + body).
+- [x] `GET /api/ws` WebSocket that streams summaries of new flows from the broadcast channel.
+- [x] `DELETE /api/flows` to clear, `GET /api/flows/:id/har` to export HAR, and a "copy as curl" endpoint.
+- [x] Frontend assets are embedded into the binary with `rust-embed`, so it stays a single file.
+- [x] Bind to `127.0.0.1` only by default; expose to the LAN only with an explicit flag.
 
 **Frontend**
 
-- [ ] Stack options: Svelte or SolidJS + Vite (lightweight), or Leptos for full Rust. Recommendation: Svelte, to get it done quickly.
-- [ ] Virtualized request table (thousands of rows), columns: time, method, host, path, status, size, duration.
-- [ ] Detail panel: Headers, Request body, Response body (pretty JSON, image preview, hex for binary), and Timing tabs.
-- [ ] Fast text filter plus a per-device/source filter.
-- [ ] Pause capture and clear buttons.
+- [x] Stack options: Svelte or SolidJS + Vite (lightweight), or Leptos for full Rust. Recommendation: Svelte, to get it done quickly.
+- [x] Virtualized request table (thousands of rows), columns: time, method, host, path, status, size, duration.
+- [x] Detail panel: Headers, Request body, Response body (pretty JSON, image preview, hex for binary), and Timing tabs.
+- [x] Fast text filter plus a per-device/source filter.
+- [x] Pause capture and clear buttons.
 
 **Optional later**
 
