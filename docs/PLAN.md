@@ -122,11 +122,11 @@ Running `adb` through `tokio::process::Command` is enough. Wrap it in an `Androi
 
 **iOS Simulator (macOS only)**
 
-- [ ] List booted simulators with `xcrun simctl list devices booted -j`.
-- [ ] Install the CA: `xcrun simctl keychain <udid> add-root-cert ca.pem`.
-- [ ] Set the Mac system proxy with `networksetup -setwebproxy` and `-setsecurewebproxy` on the active network service. Save the old settings first.
-- [ ] Restore the old settings on teardown or Ctrl+C. This is mandatory, because the proxy applies to the whole Mac.
-- [ ] Alternative that leaves the Mac alone: document how to set the proxy in `URLSessionConfiguration` for your own app's debug build.
+- [x] List booted simulators with `xcrun simctl list devices booted -j`.
+- [x] Install the CA: `xcrun simctl keychain <udid> add-root-cert ca.pem`.
+- [x] Set the Mac system proxy with `networksetup -setwebproxy` and `-setsecurewebproxy` on the active network service. Save the old settings first.
+- [x] Restore the old settings on teardown or Ctrl+C. This is mandatory, because the proxy applies to the whole Mac.
+- [x] Alternative that leaves the Mac alone: document how to set the proxy in `URLSessionConfiguration` for your own app's debug build.
 
 **Phase 2 tests**
 
