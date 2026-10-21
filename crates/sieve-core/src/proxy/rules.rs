@@ -204,7 +204,7 @@ fn apply_edit(parts: &mut Parts, body: &mut Bytes, edit: RequestEdit) {
     }
 }
 
-fn apply_headers(headers: &mut HeaderMap, set: &[(String, String)], remove: &[String]) {
+pub(super) fn apply_headers(headers: &mut HeaderMap, set: &[(String, String)], remove: &[String]) {
     for name in remove {
         if let Ok(name) = HeaderName::from_bytes(name.trim().as_bytes()) {
             headers.remove(name);
@@ -221,7 +221,7 @@ fn apply_headers(headers: &mut HeaderMap, set: &[(String, String)], remove: &[St
 }
 
 /// Points `uri` at `target` (`host:port` or a URL), keeping the path and query.
-fn remap(uri: &Uri, target: &str) -> Option<Uri> {
+pub(super) fn remap(uri: &Uri, target: &str) -> Option<Uri> {
     let target = target.trim();
     let target: Uri = if target.contains("://") {
         target.parse().ok()?
@@ -239,7 +239,7 @@ fn remap(uri: &Uri, target: &str) -> Option<Uri> {
 }
 
 /// A response made by sieve: a rule's mock, or the `403` of a block.
-async fn synthetic(
+pub(super) async fn synthetic(
     plan: &Plan,
     exchange: Arc<Exchange>,
     client_version: Version,

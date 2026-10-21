@@ -5,7 +5,7 @@ use std::{
     mem,
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, PoisonError},
     task::{Context, Poll, ready},
     time::Instant,
 };
@@ -22,7 +22,8 @@ use crate::flow::{Body, Flow, FlowId, FlowKind, FlowSender, Request, Response, T
 /// published when the response body ends, fails, or is dropped, and the
 /// request body has ended too: a server can answer before the client has
 /// finished sending (a 413 to an upload, an early 401), and the flow must
-/// still carry the request body that was received.
+/// still carry the request body that was received. An exchange dropped before
+/// that is published with an error; see its `Drop`.
 pub(crate) struct Exchange {
     flows: FlowSender,
     started: Instant,
@@ -204,6 +205,37 @@ impl Exchange {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().expect("exchange state poisoned")
+    }
+}
+
+/// The last reference to an exchange that never finished goes away when the
+/// client gave up first: it closed the connection or reset the h2 stream
+/// while sieve waited for the upstream or a breakpoint, and hyper dropped the
+/// handler. Publishes the flow then, so it does not stay pending forever.
+impl Drop for Exchange {
+    fn drop(&mut self) {
+        let total = self.elapsed_ms();
+        let (flow, request_body, response_body) = {
+            let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
+            if state.finished {
+                return;
+            }
+            state.finished = true;
+            // A response that already ended was finished, error and all.
+            let response_body = state.response_done.take();
+            if response_body.is_none() {
+                state.flow.timing.total_ms = Some(total);
+                state.flow.error = Some(
+                    "the client cancelled the request before the response arrived".to_string(),
+                );
+            }
+            (
+                state.flow.clone(),
+                mem::take(&mut state.request_body),
+                response_body,
+            )
+        };
+        self.publish(flow, request_body, response_body);
     }
 }
 
@@ -410,5 +442,55 @@ mod tests {
         let mut c = Captured::default();
         c.push(b"12345678", 8);
         assert!(!c.truncated);
+    }
+
+    fn exchange(flows: FlowSender) -> Arc<Exchange> {
+        let head = RequestHead {
+            method: "GET",
+            url: "http://a.test/".to_string(),
+            version: Version::HTTP_11,
+            headers: &HeaderMap::new(),
+        };
+        let client = SocketAddr::from(([127, 0, 0, 1], 1));
+        Exchange::new(1, client, FlowKind::Http, head, flows, 1024)
+    }
+
+    #[tokio::test]
+    async fn dropping_an_unfinished_exchange_publishes_it_with_an_error() {
+        let flows = crate::flow::channel();
+        let mut rx = flows.subscribe();
+        drop(exchange(flows));
+        let flow = rx.recv().await.unwrap();
+        assert!(flow.error.as_deref().unwrap().contains("cancelled"));
+        assert!(flow.timing.total_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_finished_exchange_is_published_once() {
+        let flows = crate::flow::channel();
+        let mut rx = flows.subscribe();
+        let exchange = exchange(flows);
+        exchange.set_response(200, Version::HTTP_11, &HeaderMap::new());
+        exchange.finish(Some(Captured::default()), None);
+        drop(exchange);
+        let flow = rx.recv().await.unwrap();
+        assert!(flow.error.is_none());
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_response_that_ended_before_the_request_body_keeps_its_result() {
+        let flows = crate::flow::channel();
+        let mut rx = flows.subscribe();
+        let exchange = exchange(flows);
+        exchange.request_body_started();
+        exchange.set_response(413, Version::HTTP_11, &HeaderMap::new());
+        exchange.finish(Some(Captured::default()), None);
+        assert!(rx.try_recv().is_err());
+        drop(exchange);
+        let flow = rx.recv().await.unwrap();
+        assert_eq!(flow.response.as_ref().unwrap().status, 413);
+        assert!(flow.error.is_none());
     }
 }

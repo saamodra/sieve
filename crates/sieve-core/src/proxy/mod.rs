@@ -433,10 +433,24 @@ impl Conn {
         }
     }
 
+    /// Relays a WebSocket handshake and, once upgraded, the connection.
+    ///
+    /// Rules apply to the handshake: block and mock answer it without an
+    /// upgrade, and request header rules and map_remote change what is sent.
+    /// Response edits, delays and breakpoints are not applied: the handshake
+    /// has no body worth editing, and its answer has to stay a valid `101`.
     async fn upgrade(&self, mut req: Request<Incoming>, uri: Uri) -> Response<ProxyBody> {
         let exchange = self.exchange(FlowKind::WebSocket, &req, websocket_url(&uri));
         exchange.emit_start();
         let client_version = req.version();
+        let plan = rules::plan_for(self, &req, &uri);
+        if let Some(plan) = plan.as_ref().filter(|p| p.block || p.mock.is_some()) {
+            // Read the request so the flow records it.
+            let _ = CaptureBody::new(req.into_body(), Side::Request, exchange.clone())
+                .collect()
+                .await;
+            return rules::synthetic(plan, exchange, client_version).await;
+        }
         let client_upgrade = hyper::upgrade::on(&mut req);
 
         let (mut parts, body) = req.into_parts();
@@ -444,6 +458,15 @@ impl Conn {
         parts.version = Version::HTTP_11;
         strip_hop_by_hop(&mut parts.headers, true);
         parts.headers.remove(header::HOST);
+        if let Some(plan) = &plan
+            && edit_handshake(&mut parts, plan)
+        {
+            exchange.update_request(
+                parts.method.as_str(),
+                websocket_url(&parts.uri),
+                &parts.headers,
+            );
+        }
         let body = CaptureBody::new(body, Side::Request, exchange.clone()).boxed_unsync();
 
         let request = Request::from_parts(parts, body);
@@ -531,6 +554,30 @@ fn respond(
         None => CaptureBody::new(body, Side::Response, exchange).boxed_unsync(),
     };
     Response::from_parts(parts, body)
+}
+
+/// Applies the request header rules and map_remote of `plan` to a WebSocket
+/// handshake. Returns whether anything changed.
+fn edit_handshake(parts: &mut http::request::Parts, plan: &Plan) -> bool {
+    let mut changed =
+        !plan.set_request_headers.is_empty() || !plan.remove_request_headers.is_empty();
+    rules::apply_headers(
+        &mut parts.headers,
+        &plan.set_request_headers,
+        &plan.remove_request_headers,
+    );
+    if let Some(target) = &plan.map_remote {
+        match rules::remap(&parts.uri, target) {
+            Some(uri) => {
+                parts.uri = uri;
+                changed = true;
+            }
+            None => {
+                warn!("map_remote {target:?} is not a usable address; sending the handshake as is")
+            }
+        }
+    }
+    changed
 }
 
 fn upstream_failed(exchange: &Exchange, error: &(dyn StdError + 'static)) -> Response<ProxyBody> {
