@@ -166,8 +166,9 @@ Undo it: set Configure Proxy back to Off, and remove the profile under VPN & Dev
 ## Reset if something is stuck
 
 ```sh
-sieve doctor --restore                                  # Mac proxy saved by ios-sim setup
-sieve android teardown                                  # or by hand:
+sieve doctor                                            # lists leftover Mac and Android proxy state
+sieve doctor --restore                                  # Mac proxy and Android http_proxy saved by setup
+sieve android teardown                                  # restores http_proxy, removes adb reverse; or by hand:
 adb shell settings put global http_proxy :0
 adb reverse --remove-all
 networksetup -setwebproxystate "<service>" off          # last resort on the Mac
