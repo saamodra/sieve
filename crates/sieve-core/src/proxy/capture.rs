@@ -19,7 +19,10 @@ use super::{BoxError, decode::decode};
 use crate::flow::{Body, Flow, FlowId, FlowKind, FlowSender, Request, Response, Timing};
 
 /// Shared by the request and response bodies of one exchange. The flow is
-/// published when the response body ends, fails, or is dropped.
+/// published when the response body ends, fails, or is dropped, and the
+/// request body has ended too: a server can answer before the client has
+/// finished sending (a 413 to an upload, an early 401), and the flow must
+/// still carry the request body that was received.
 pub(crate) struct Exchange {
     flows: FlowSender,
     started: Instant,
@@ -30,6 +33,10 @@ pub(crate) struct Exchange {
 struct State {
     flow: Flow,
     request_body: Captured,
+    /// A request body is still being read.
+    request_pending: bool,
+    /// The response ended while the request body was pending.
+    response_done: Option<Captured>,
     finished: bool,
 }
 
@@ -72,6 +79,8 @@ impl Exchange {
             state: Mutex::new(State {
                 flow,
                 request_body: Captured::default(),
+                request_pending: false,
+                response_done: None,
                 finished: false,
             }),
         })
@@ -95,29 +104,62 @@ impl Exchange {
         state.flow.timing.wait_ms = Some(wait);
     }
 
-    pub(crate) fn request_body_done(&self, body: Captured, error: Option<String>) {
-        let mut state = self.lock();
-        state.request_body = body;
-        if let Some(error) = error {
-            state.flow.error.get_or_insert(error);
-        }
+    /// Marks the request body as still being read, so the flow is held back
+    /// until [`Exchange::request_body_done`].
+    fn request_body_started(&self) {
+        self.lock().request_pending = true;
     }
 
-    /// Completes the flow and publishes it. Later calls are ignored.
+    pub(crate) fn request_body_done(&self, body: Captured, error: Option<String>) {
+        let (flow, request_body, response_body) = {
+            let mut state = self.lock();
+            state.request_body = body;
+            state.request_pending = false;
+            // A body cut short after the response is complete is not an error
+            // of the exchange: the server just did not want the rest.
+            if let Some(error) = error
+                && state.response_done.is_none()
+                && !state.finished
+            {
+                state.flow.error.get_or_insert(error);
+            }
+            let Some(response_body) = state.response_done.take() else {
+                return;
+            };
+            state.finished = true;
+            (
+                state.flow.clone(),
+                mem::take(&mut state.request_body),
+                response_body,
+            )
+        };
+        self.publish(flow, request_body, Some(response_body));
+    }
+
+    /// Completes the flow and publishes it, once the request body has ended
+    /// as well. Later calls are ignored.
     pub(crate) fn finish(&self, response_body: Option<Captured>, error: Option<String>) {
         let total = self.elapsed_ms();
-        let (mut flow, request_body) = {
+        let (flow, request_body) = {
             let mut state = self.lock();
-            if mem::replace(&mut state.finished, true) {
+            if state.finished || state.response_done.is_some() {
                 return;
             }
             state.flow.timing.total_ms = Some(total);
             if let Some(error) = error {
                 state.flow.error = Some(error);
             }
+            if state.request_pending {
+                state.response_done = Some(response_body.unwrap_or_default());
+                return;
+            }
+            state.finished = true;
             (state.flow.clone(), mem::take(&mut state.request_body))
         };
+        self.publish(flow, request_body, response_body);
+    }
 
+    fn publish(&self, mut flow: Flow, request_body: Captured, response_body: Option<Captured>) {
         let flows = self.flows.clone();
         let limit = self.max_body;
         let publish = async move {
@@ -201,6 +243,9 @@ pub(crate) struct CaptureBody<B: HttpBody> {
 
 impl<B: HttpBody> CaptureBody<B> {
     pub(crate) fn new(inner: B, side: Side, exchange: Arc<Exchange>) -> Self {
+        if side == Side::Request {
+            exchange.request_body_started();
+        }
         let mut body = Self {
             inner,
             side,
