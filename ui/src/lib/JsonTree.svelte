@@ -20,7 +20,7 @@
   );
 
   let override = $state<boolean | null>(null);
-  const open = $derived(override ?? depth < 2);
+  const open = $derived(override ?? true);
 
   // Start at the current count so a freshly mounted node ignores an old signal.
   let seen = $state.raw(untrack(() => signal?.n ?? 0));
