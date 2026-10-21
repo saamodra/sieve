@@ -159,6 +159,17 @@ fn parse_http_proxy(output: &str) -> Option<String> {
     }
 }
 
+/// True for a proxy on the device's own loopback, which is what `setup` sets
+/// (through `adb reverse`) and is dead once sieve is gone. The port may differ
+/// between runs.
+fn is_loopback_proxy(value: &str) -> bool {
+    let host = value.rsplit_once(':').map_or(value, |(host, _)| host);
+    matches!(
+        host.trim_matches(['[', ']']),
+        "127.0.0.1" | "localhost" | "::1"
+    )
+}
+
 /// Saves the device's current `http_proxy` before sieve changes it. An
 /// existing file is kept: it holds the original value, while the device may
 /// by now show sieve's own proxy.
@@ -171,9 +182,16 @@ async fn save_proxy<B: AndroidBridge>(bridge: &B, state_dir: &Path, serial: &str
         .shell(Some(serial), "settings get global http_proxy")
         .await
         .context("reading http_proxy")?;
+    let mut http_proxy = parse_http_proxy(&current);
+    if let Some(stale) = http_proxy.take_if(|v| is_loopback_proxy(v)) {
+        warn!(
+            serial,
+            "found a stale sieve proxy ({stale}) on the device; treating it as no previous proxy"
+        );
+    }
     let state = SavedProxy {
         serial: serial.to_string(),
-        http_proxy: parse_http_proxy(&current),
+        http_proxy,
     };
     fs::create_dir_all(state_dir).with_context(|| format!("creating {}", state_dir.display()))?;
     fs::write(&file, serde_json::to_vec_pretty(&state)?)
@@ -772,6 +790,28 @@ mod tests {
         };
         assert!(restore_proxy(&broken, dir.path(), "emu").await.is_err());
         assert_eq!(find_leftovers(dir.path()).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_sieve_proxy_is_not_saved_as_previous() {
+        for stale in ["127.0.0.1:9999", "localhost:8080", "::1:8080", "[::1]:8080"] {
+            let m = Mock {
+                replies: vec![("settings get", stale)],
+                ..Default::default()
+            };
+            let dir = tempfile::tempdir().unwrap();
+            setup(&m, dir.path(), "emu", 8080, "PEM").await.unwrap();
+            assert_eq!(
+                find_leftovers(dir.path()).unwrap()[0].state.http_proxy,
+                None,
+                "{stale}"
+            );
+            teardown(&m, dir.path(), "emu", 8080).await.unwrap();
+            assert!(
+                m.calls()
+                    .contains(&"-s emu shell settings put global http_proxy :0".to_string())
+            );
+        }
     }
 
     #[test]
