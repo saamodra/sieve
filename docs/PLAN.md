@@ -85,23 +85,23 @@ Outcome of this phase: `sieve start` runs a proxy on port 8080 that can intercep
 
 **Phase 1a: Certificate Authority**
 
-- [ ] Generate the root CA once with `rcgen`: ECDSA P-256 or RSA 2048 key, valid for about 1 year, stored as `ca.pem` and `ca.key` with permission 600.
-- [ ] `sieve ca export --format pem|der|cer` for device needs (Android needs the hash file name, iOS needs `.cer` or a profile).
-- [ ] Compute `subject_hash_old` for the Android file name. Calling `openssl x509 -subject_hash_old` is fine at first; it can be replaced with a Rust implementation later.
-- [ ] Per-host leaf certs are generated on the fly and cached in memory (LRU); the SAN must be set to the hostname/IP.
+- [x] Generate the root CA once with `rcgen`: ECDSA P-256 or RSA 2048 key, valid for about 1 year, stored as `ca.pem` and `ca.key` with permission 600.
+- [x] `sieve ca export --format pem|der|cer` for device needs (Android needs the hash file name, iOS needs `.cer` or a profile).
+- [x] Compute `subject_hash_old` for the Android file name. Calling `openssl x509 -subject_hash_old` is fine at first; it can be replaced with a Rust implementation later.
+- [x] Per-host leaf certs are generated on the fly and cached in memory (LRU); the SAN must be set to the hostname/IP.
 
 **Phase 1b: core proxy**
 
-- [ ] Proxy built on `hudsucker` (hyper + rustls) using the CA from 1a.
-- [ ] Support HTTP/1.1, HTTP/2 via ALPN, and WebSocket upgrades.
-- [ ] Every request becomes a `Flow` (id, time, method, URL, headers, request/response body, status, duration, size) sent to a `tokio::sync::broadcast` channel.
-- [ ] Large bodies are stored truncated (e.g. at most 5 MB in memory); the rest is marked truncated.
-- [ ] Decompress gzip, br, and zstd for display, but forward the original traffic as is.
-- [ ] Per-host passthrough option (no interception) for pinned or unimportant domains.
+- [x] Proxy built on `hudsucker` (hyper + rustls) using the CA from 1a. Done on hyper + tokio-rustls directly instead, because hudsucker cannot report client TLS handshake failures (see `proxy/mod.rs`).
+- [x] Support HTTP/1.1, HTTP/2 via ALPN, and WebSocket upgrades.
+- [x] Every request becomes a `Flow` (id, time, method, URL, headers, request/response body, status, duration, size) sent to a `tokio::sync::broadcast` channel.
+- [x] Large bodies are stored truncated (e.g. at most 5 MB in memory); the rest is marked truncated.
+- [x] Decompress gzip, br, and zstd for display, but forward the original traffic as is.
+- [x] Per-host passthrough option (no interception) for pinned or unimportant domains.
 
 **Phase 1 tests**
 
-- [ ] `curl -x http://127.0.0.1:8080 --cacert ca.pem https://example.com` succeeds and is recorded.
+- [x] `curl -x http://127.0.0.1:8080 --cacert ca.pem https://example.com` succeeds and is recorded.
 - [ ] A browser on the Mac with a manual proxy can open HTTP/2 sites without certificate errors.
 
 ## Phase 2: Android mode 1 + iOS Simulator
@@ -110,23 +110,23 @@ Outcome of this phase: `sieve android setup` and `sieve ios-sim setup` get debug
 
 **Android mode 1 (no root, your own app)**
 
-- [ ] Detect devices with `adb devices -l`; if there is more than one, ask the user to pick or accept `--serial`.
-- [ ] `adb reverse tcp:8080 tcp:8080` so the device reaches the proxy on `127.0.0.1` over USB.
-- [ ] `adb shell settings put global http_proxy 127.0.0.1:8080` during setup.
-- [ ] `sieve android teardown` restores `:0` and removes the reverse. Teardown also runs automatically on Ctrl+C.
-- [ ] Push the CA to `/sdcard/Download/sieve-ca.crt`, then print short instructions for installing it via Settings > Security > Install certificate.
-- [ ] `sieve android nsc` prints a `network_security_config.xml` snippet (a `debug-overrides` block that trusts user certs) and the manifest line to add.
-- [ ] Health check: proxy is set, reverse is active, and a test request from `adb shell` (if the device has `curl`) reaches the proxy.
+- [x] Detect devices with `adb devices -l`; if there is more than one, ask the user to pick or accept `--serial`.
+- [x] `adb reverse tcp:8080 tcp:8080` so the device reaches the proxy on `127.0.0.1` over USB.
+- [x] `adb shell settings put global http_proxy 127.0.0.1:8080` during setup.
+- [x] `sieve android teardown` restores `:0` and removes the reverse. Teardown also runs automatically on Ctrl+C.
+- [x] Push the CA to `/sdcard/Download/sieve-ca.crt`, then print short instructions for installing it via Settings > Security > Install certificate.
+- [x] `sieve android nsc` prints a `network_security_config.xml` snippet (a `debug-overrides` block that trusts user certs) and the manifest line to add.
+- [x] Health check: proxy is set, reverse is active, and a test request from `adb shell` (if the device has `curl`) reaches the proxy.
 
 Running `adb` through `tokio::process::Command` is enough. Wrap it in an `AndroidBridge` trait so it is easy to mock in tests.
 
 **iOS Simulator (macOS only)**
 
-- [ ] List booted simulators with `xcrun simctl list devices booted -j`.
-- [ ] Install the CA: `xcrun simctl keychain <udid> add-root-cert ca.pem`.
-- [ ] Set the Mac system proxy with `networksetup -setwebproxy` and `-setsecurewebproxy` on the active network service. Save the old settings first.
-- [ ] Restore the old settings on teardown or Ctrl+C. This is mandatory, because the proxy applies to the whole Mac.
-- [ ] Alternative that leaves the Mac alone: document how to set the proxy in `URLSessionConfiguration` for your own app's debug build.
+- [x] List booted simulators with `xcrun simctl list devices booted -j`.
+- [x] Install the CA: `xcrun simctl keychain <udid> add-root-cert ca.pem`.
+- [x] Set the Mac system proxy with `networksetup -setwebproxy` and `-setsecurewebproxy` on the active network service. Save the old settings first.
+- [x] Restore the old settings on teardown or Ctrl+C. This is mandatory, because the proxy applies to the whole Mac.
+- [x] Alternative that leaves the Mac alone: document how to set the proxy in `URLSessionConfiguration` for your own app's debug build.
 
 **Phase 2 tests**
 
@@ -164,20 +164,20 @@ Outcome of this phase: a real iPhone can be set up by scanning a QR code, and an
 
 **Physical iOS device (semi-automatic)**
 
-- [ ] Proxy listens on the LAN IP (opt-in), with automatic detection of the Mac's Wi-Fi IP.
-- [ ] `/setup/ios.mobileconfig` endpoint containing a `com.apple.security.root` payload with the CA. The profile does not need to be signed for v1 (it shows as "Not Verified", which is normal).
-- [ ] `/proxy.pac` endpoint that routes all traffic to `PROXY <mac-ip>:8080; DIRECT`.
-- [ ] `sieve ios-device setup` shows a QR code in the terminal (`qrcode` crate) pointing at the `/setup/ios` page, which has a profile download button and short steps.
-- [ ] Manual steps on the iPhone: install the profile, enable it under Settings > General > About > Certificate Trust Settings, set the Wi-Fi proxy to Automatic with the PAC URL.
-- [ ] The setup page can check status: once requests from the iPhone come through HTTPS without errors, show a green check mark.
+- [x] Proxy listens on the LAN IP (opt-in), with automatic detection of the Mac's Wi-Fi IP.
+- [x] `/setup/ios.mobileconfig` endpoint containing a `com.apple.security.root` payload with the CA. The profile does not need to be signed for v1 (it shows as "Not Verified", which is normal).
+- [x] `/proxy.pac` endpoint that routes all traffic to `PROXY <mac-ip>:8080; DIRECT`.
+- [x] `sieve ios-device setup` shows a QR code in the terminal (`qrcode` crate) pointing at the `/setup/ios` page, which has a profile download button and short steps.
+- [x] Manual steps on the iPhone: install the profile, enable it under Settings > General > About > Certificate Trust Settings, set the Wi-Fi proxy to Automatic with the PAC URL.
+- [x] The setup page can check status: once requests from the iPhone come through HTTPS without errors, show a green check mark.
 
 **Android mode 2 (Google APIs emulator or rooted device)**
 
-- [ ] Detect whether `adb root` or `su` is available; if not, refuse with a clear message.
-- [ ] Android 13 and below: mount a tmpfs over `/system/etc/security/cacerts`, copy the existing certs plus `sieve`'s `<hash>.0`, set permissions and the SELinux label.
-- [ ] Android 14+: do the same in `/apex/com.android.conscrypt/cacerts`, then bind-mount into the namespace of every zygote process and already-running app with `nsenter`.
-- [ ] Everything goes through a single shell script that is pushed and run via `adb shell`. Study HTTP Toolkit's approach as a reference.
-- [ ] The effect disappears on reboot (by design, safe); provide `sieve android inject-ca` to redo it.
+- [x] Detect whether `adb root` or `su` is available; if not, refuse with a clear message.
+- [x] Android 13 and below: mount a tmpfs over `/system/etc/security/cacerts`, copy the existing certs plus `sieve`'s `<hash>.0`, set permissions and the SELinux label.
+- [x] Android 14+: do the same in `/apex/com.android.conscrypt/cacerts`, then bind-mount into the namespace of every zygote process and already-running app with `nsenter`.
+- [x] Everything goes through a single shell script that is pushed and run via `adb shell`. Study HTTP Toolkit's approach as a reference.
+- [x] The effect disappears on reboot (by design, safe); provide `sieve android inject-ca` to redo it.
 
 **Phase 4 tests**
 

@@ -41,14 +41,19 @@ pub struct Flow {
 pub enum FlowKind {
     Http,
     WebSocket,
-    /// Tunneled without interception; only the CONNECT target is known.
+    /// Tunneled without interception; only the CONNECT target is known. The
+    /// response is the proxy's `200` to the CONNECT, and the body sizes count
+    /// the bytes tunneled each way.
     Passthrough,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub method: String,
+    /// An absolute URL (`ws://`/`wss://` for WebSockets), or `host:port` for
+    /// CONNECT flows: passthrough tunnels and failed TLS handshakes.
     pub url: String,
+    /// `HTTP/1.1` or `HTTP/2.0`.
     pub http_version: String,
     pub headers: Vec<(String, String)>,
     pub body: Body,

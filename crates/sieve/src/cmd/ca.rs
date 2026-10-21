@@ -1,6 +1,10 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    io::{IsTerminal, Write},
+    path::PathBuf,
+};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use sieve_core::{CertAuthority, ca::ExportFormat};
 
@@ -24,6 +28,8 @@ enum CaCommand {
     },
     /// Print the CA's subject_hash_old (the Android cacerts file name).
     Hash,
+    /// Show the CA's fingerprint, validity, and file locations.
+    Info,
     /// Print where the CA files live.
     Path,
     /// Replace the CA with a new one. Devices must trust it again.
@@ -54,17 +60,34 @@ pub async fn run(ctx: Context, args: CaArgs) -> Result<()> {
             match out {
                 Some(path) => fs::write(&path, bytes)
                     .with_context(|| format!("writing {}", path.display()))?,
-                None => std::io::Write::write_all(&mut std::io::stdout(), &bytes)?,
+                None if !matches!(format, Format::Pem) && std::io::stdout().is_terminal() => {
+                    bail!("refusing to write binary DER to the terminal; pass --out <FILE>")
+                }
+                None => std::io::stdout().write_all(&bytes)?,
             }
         }
         CaCommand::Hash => println!("{}", ctx.load_ca()?.subject_hash_old()?),
+        CaCommand::Info => {
+            let ca = ctx.load_ca()?;
+            println!("certificate  {}", ctx.paths.ca_cert().display());
+            println!("key          {}", ctx.paths.ca_key().display());
+            println!(
+                "valid        {} to {}",
+                ca.not_before().date(),
+                ca.not_after().date()
+            );
+            println!("sha256       {}", ca.sha256_fingerprint());
+            println!("android name {}.0", ca.subject_hash_old()?);
+        }
         CaCommand::Path => {
             println!("{}", ctx.paths.ca_cert().display());
             println!("{}", ctx.paths.ca_key().display());
         }
         CaCommand::Regenerate => {
-            CertAuthority::regenerate(&ctx.paths)?;
+            let ca = CertAuthority::regenerate(&ctx.paths)?;
             println!("new CA written to {}", ctx.paths.ca_cert().display());
+            println!("sha256 {}", ca.sha256_fingerprint());
+            println!("devices that trusted the old CA must trust this one instead");
         }
     }
     Ok(())
