@@ -15,6 +15,14 @@ Rules can:
 
 They live in `rules.toml` (or `rules.json`) in the config directory. sieve watches the file, so edits apply right away. You can also edit rules from the web UI.
 
+### When several rules match
+
+Rules are checked in file order and the first one wins:
+
+- `mock`, `map_remote`, `response_status`, `response_body`, and `delay_ms` come from the first matching rule that sets them. Delays do not add up.
+- `block` and `breakpoint` are on if any matching rule turns them on.
+- Header rules are decided per header name (case-insensitive). If an earlier rule sets or removes a header, later rules cannot change it. Other header names from later rules still apply.
+
 ## Breakpoints
 
 Pause a request, edit it in the UI, then continue or abort.

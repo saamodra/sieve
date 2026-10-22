@@ -147,10 +147,147 @@ fn plans_merge_matching_rules_and_skip_disabled_ones() {
     let plan = engine.plan(&req("GET", "h", "/", &headers));
     assert!(!plan.block);
     assert_eq!(plan.matched.len(), 2);
-    assert_eq!(plan.delay, Duration::from_millis(15));
+    assert_eq!(plan.delay, Duration::from_millis(10));
     assert_eq!(plan.response_status, Some(201));
     assert_eq!(plan.map_remote.as_deref(), Some("localhost:3000"));
     assert!(plan.edits_response());
+}
+
+fn plan_of(rules: Vec<Rule>) -> Plan {
+    let engine = RuleEngine::new(None);
+    engine.replace(rules).unwrap();
+    let headers = HeaderMap::new();
+    engine.plan(&req("GET", "h", "/", &headers))
+}
+
+fn any(action: Action) -> Rule {
+    rule(Matcher::default(), action)
+}
+
+#[test]
+fn the_first_matching_rule_wins_each_scalar_action() {
+    let plan = plan_of(vec![
+        any(Action {
+            response_status: Some(201),
+            response_body: Some("one".into()),
+            delay_ms: Some(10),
+            map_remote: Some("first:1".into()),
+            mock: Some(Mock {
+                status: 202,
+                ..Mock::default()
+            }),
+            ..Action::default()
+        }),
+        any(Action {
+            response_status: Some(404),
+            response_body: Some("two".into()),
+            delay_ms: Some(500),
+            map_remote: Some("second:2".into()),
+            mock: Some(Mock {
+                status: 418,
+                ..Mock::default()
+            }),
+            ..Action::default()
+        }),
+    ]);
+    assert_eq!(plan.response_status, Some(201));
+    assert_eq!(plan.response_body.as_deref(), Some("one"));
+    assert_eq!(plan.delay, Duration::from_millis(10));
+    assert_eq!(plan.map_remote.as_deref(), Some("first:1"));
+    assert_eq!(plan.mock.unwrap().status, 202);
+}
+
+#[test]
+fn a_later_rule_fills_in_what_an_earlier_one_left_unset() {
+    let plan = plan_of(vec![
+        any(Action {
+            response_status: Some(201),
+            ..Action::default()
+        }),
+        any(Action {
+            response_status: Some(404),
+            response_body: Some("two".into()),
+            delay_ms: Some(5),
+            ..Action::default()
+        }),
+    ]);
+    assert_eq!(plan.response_status, Some(201));
+    assert_eq!(plan.response_body.as_deref(), Some("two"));
+    assert_eq!(plan.delay, Duration::from_millis(5));
+}
+
+#[test]
+fn block_and_breakpoint_are_on_when_any_rule_enables_them() {
+    let plan = plan_of(vec![
+        any(Action {
+            block: true,
+            ..Action::default()
+        }),
+        any(Action {
+            breakpoint: true,
+            ..Action::default()
+        }),
+    ]);
+    assert!(plan.block);
+    assert!(plan.breakpoint);
+}
+
+#[test]
+fn the_first_rule_decides_a_header_name_case_insensitively() {
+    let set = |name: &str, value: &str| -> BTreeMap<String, String> {
+        [(name.to_string(), value.to_string())].into()
+    };
+    let plan = plan_of(vec![
+        any(Action {
+            set_request_headers: set("X-Tag", "first"),
+            set_response_headers: set("x-r", "first"),
+            remove_response_headers: vec!["x-gone".into()],
+            ..Action::default()
+        }),
+        any(Action {
+            set_request_headers: [
+                ("x-tag".to_string(), "second".to_string()),
+                ("x-other".to_string(), "kept".to_string()),
+            ]
+            .into(),
+            remove_request_headers: vec!["X-TAG".into()],
+            set_response_headers: [
+                ("X-R".to_string(), "second".to_string()),
+                ("x-gone".to_string(), "revived".to_string()),
+            ]
+            .into(),
+            ..Action::default()
+        }),
+    ]);
+    assert_eq!(
+        plan.set_request_headers,
+        vec![
+            ("X-Tag".to_string(), "first".to_string()),
+            ("x-other".to_string(), "kept".to_string())
+        ]
+    );
+    assert!(plan.remove_request_headers.is_empty());
+    assert_eq!(
+        plan.set_response_headers,
+        vec![("x-r".to_string(), "first".to_string())]
+    );
+    assert_eq!(plan.remove_response_headers, vec!["x-gone".to_string()]);
+}
+
+#[test]
+fn an_earlier_set_beats_a_later_remove_of_the_same_header() {
+    let plan = plan_of(vec![
+        any(Action {
+            set_request_headers: [("x-a".to_string(), "1".to_string())].into(),
+            ..Action::default()
+        }),
+        any(Action {
+            remove_request_headers: vec!["X-A".into(), "x-b".into()],
+            ..Action::default()
+        }),
+    ]);
+    assert_eq!(plan.set_request_headers.len(), 1);
+    assert_eq!(plan.remove_request_headers, vec!["x-b".to_string()]);
 }
 
 #[test]
