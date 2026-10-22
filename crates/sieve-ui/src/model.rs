@@ -244,11 +244,23 @@ fn shell_quote(s: &str) -> String {
 }
 
 /// A `curl` command reproducing the request. Binary bodies are piped in from
-/// base64 so the command stays copy-pasteable.
+/// base64 so the command stays copy-pasteable. A request with a
+/// `Content-Encoding` is sent as the raw wire bytes so the header stays true.
 pub fn curl(f: &Flow) -> String {
     let req = &f.request;
+    let encoded = header(&req.headers, "content-encoding")
+        .is_some_and(|v| !v.trim().is_empty() && !v.trim().eq_ignore_ascii_case("identity"));
+    let body = if encoded {
+        &req.body.raw
+    } else {
+        display_bytes(&req.body)
+    };
     let mut parts = Vec::new();
-    if req.method != "GET" {
+    if req.method.eq_ignore_ascii_case("HEAD") {
+        // `-X HEAD` makes curl wait for a body that never comes.
+        parts.push("-I".to_string());
+    } else if req.method != "GET" || (!body.is_empty() && req.method != "POST") {
+        // curl turns a GET with data into a POST unless told otherwise.
         parts.push(format!("-X {}", shell_quote(&req.method)));
     }
     parts.push(shell_quote(&req.url));
@@ -259,15 +271,23 @@ pub fn curl(f: &Flow) -> String {
         parts.push(format!("-H {}", shell_quote(&format!("{k}: {v}"))));
     }
     // Without this curl prints the still-compressed response as binary.
-    if req
-        .headers
-        .iter()
-        .any(|(k, _)| k.eq_ignore_ascii_case("accept-encoding"))
-    {
+    if header(&req.headers, "accept-encoding").is_some() {
         parts.push("--compressed".to_string());
     }
-    let body = display_bytes(&req.body);
-    let join = |parts: &[String]| format!("curl {}", parts.join(" \\\n  "));
+    let warning = req.body.truncated.then(|| {
+        format!(
+            "# sieve: request body was truncated at {} of {} bytes; this command sends only the captured part\n",
+            req.body.raw.len(),
+            req.body.size
+        )
+    });
+    let join = |parts: &[String]| {
+        format!(
+            "{}curl {}",
+            warning.as_deref().unwrap_or(""),
+            parts.join(" \\\n  ")
+        )
+    };
     if body.is_empty() {
         return join(&parts);
     }
@@ -278,11 +298,128 @@ pub fn curl(f: &Flow) -> String {
         }
         Err(_) => {
             parts.push("--data-binary @-".to_string());
-            format!(
-                "echo {} | base64 -d | {}",
+            // The warning comment must stay above the `echo` pipeline.
+            let cmd = format!(
+                "echo {} | base64 -d | curl {}",
                 shell_quote(&B64.encode(body)),
-                join(&parts)
-            )
+                parts.join(" \\\n  ")
+            );
+            format!("{}{cmd}", warning.as_deref().unwrap_or(""))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sieve_core::flow::{Request, Timing};
+    use time::OffsetDateTime;
+
+    fn flow(method: &str, headers: &[(&str, &str)], body: Body) -> Flow {
+        Flow {
+            id: 1,
+            started_at: OffsetDateTime::UNIX_EPOCH,
+            client: None,
+            kind: FlowKind::Http,
+            request: Request {
+                method: method.into(),
+                url: "https://a.test/x".into(),
+                http_version: "HTTP/1.1".into(),
+                headers: headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                body,
+            },
+            response: None,
+            error: None,
+            timing: Timing::default(),
+        }
+    }
+
+    fn text_body(text: &'static str) -> Body {
+        Body {
+            raw: Bytes::from_static(text.as_bytes()),
+            size: text.len() as u64,
+            ..Body::default()
+        }
+    }
+
+    #[test]
+    fn curl_gzip_body_sends_raw_bytes() {
+        let raw: &'static [u8] = &[0x1f, 0x8b, 0x08, 0x00, 0xff, 0xfe];
+        let body = Body {
+            raw: Bytes::from_static(raw),
+            decoded: Some(Bytes::from_static(b"{\"a\":1}")),
+            size: raw.len() as u64,
+            content_encoding: Some("gzip".into()),
+            ..Body::default()
+        };
+        let out = curl(&flow("POST", &[("Content-Encoding", "gzip")], body));
+        assert!(out.contains("-H 'Content-Encoding: gzip'"), "{out}");
+        assert!(out.contains("--data-binary @-"), "{out}");
+        assert!(out.starts_with(&format!("echo '{}' | base64 -d | curl", B64.encode(raw))));
+        assert!(!out.contains("--data-raw"), "{out}");
+    }
+
+    #[test]
+    fn curl_plain_body_uses_decoded_text_without_content_encoding() {
+        let body = Body {
+            raw: Bytes::from_static(b"raw"),
+            decoded: Some(Bytes::from_static(b"decoded")),
+            size: 3,
+            ..Body::default()
+        };
+        let out = curl(&flow("POST", &[], body));
+        assert!(out.contains("--data-raw 'decoded'"), "{out}");
+    }
+
+    #[test]
+    fn curl_truncated_body_has_warning_comment() {
+        let mut body = text_body("abcd");
+        body.truncated = true;
+        body.size = 100;
+        let out = curl(&flow("POST", &[], body));
+        assert!(
+            out.starts_with(
+                "# sieve: request body was truncated at 4 of 100 bytes; this command sends only the captured part\ncurl "
+            ),
+            "{out}"
+        );
+        let untruncated = curl(&flow("POST", &[], text_body("abcd")));
+        assert!(!untruncated.contains("# sieve"), "{untruncated}");
+    }
+
+    #[test]
+    fn curl_truncated_binary_body_keeps_comment_above_pipeline() {
+        let body = Body {
+            raw: Bytes::from_static(&[0xff, 0xfe]),
+            size: 10,
+            truncated: true,
+            ..Body::default()
+        };
+        let out = curl(&flow("POST", &[], body));
+        let mut lines = out.lines();
+        assert!(lines.next().unwrap().starts_with("# sieve: "), "{out}");
+        assert!(lines.next().unwrap().starts_with("echo "), "{out}");
+    }
+
+    #[test]
+    fn curl_get_with_body_keeps_method() {
+        let out = curl(&flow("GET", &[], text_body("q=1")));
+        assert!(
+            out.starts_with("curl -X 'GET' \\\n  'https://a.test/x'"),
+            "{out}"
+        );
+        assert!(out.contains("--data-raw 'q=1'"), "{out}");
+        let no_body = curl(&flow("GET", &[], Body::default()));
+        assert!(!no_body.contains("-X"), "{no_body}");
+    }
+
+    #[test]
+    fn curl_head_uses_i_flag() {
+        let out = curl(&flow("HEAD", &[], Body::default()));
+        assert!(out.starts_with("curl -I \\\n"), "{out}");
+        assert!(!out.contains("-X"), "{out}");
     }
 }
