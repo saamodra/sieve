@@ -7,7 +7,8 @@ export interface Row extends FlowSummary {
   search: string;
 }
 
-const MAX_ROWS = 50_000;
+/** Matches `DEFAULT_MAX_FLOWS` in crates/sieve-ui/src/store.rs: a reload never returns more. */
+const MAX_ROWS = 10_000;
 const EVICT_BATCH = 2_000;
 
 function toRow(f: FlowSummary): Row {
@@ -75,6 +76,10 @@ export class Capture {
    * the snapshot is being fetched are queued and replayed on top of it, so a
    * newer live update is never overwritten by an older snapshot row. Only one
    * reload runs at a time; requests made meanwhile coalesce into one follow-up.
+   *
+   * The snapshot is applied even while paused: it replaces the visible rows and
+   * discards anything held before it (the snapshot already covers those). Only
+   * live events that arrive after it are held until resume.
    */
   async #reload() {
     if (this.#reloading) {
@@ -97,7 +102,7 @@ export class Capture {
         this.#queued = [];
         if (snapshot) {
           this.#dispatch({ type: 'clear' });
-          for (const flow of snapshot) this.#dispatch({ type: 'flow', flow });
+          for (const flow of snapshot) this.#enqueue({ type: 'flow', flow });
         }
         if (held) this.held = held;
         for (const ev of queued) this.#dispatch(ev);
@@ -128,11 +133,20 @@ export class Capture {
       this.held = this.held.filter((h) => h.id !== ev.id);
       return;
     }
-    if (this.paused && ev.type === 'flow') {
+    if (ev.type === 'clear') {
+      // Drop only what was held before the clear; later events stay held.
+      this.#held = [];
+      this.pendingCount = 0;
+    } else if (this.paused && ev.type === 'flow') {
       this.#held.push(ev);
       this.pendingCount = this.#held.length;
       return;
     }
+    this.#enqueue(ev);
+  }
+
+  /** Queues an event for the next animation frame, bypassing pause. */
+  #enqueue(ev: WsEvent) {
     this.#incoming.push(ev);
     if (!this.#scheduled) {
       this.#scheduled = true;
@@ -149,8 +163,6 @@ export class Capture {
       if (ev.type === 'clear') {
         this.rows = [];
         this.#index.clear();
-        this.#held = [];
-        this.pendingCount = 0;
         continue;
       }
       if (ev.type !== 'flow') continue;
