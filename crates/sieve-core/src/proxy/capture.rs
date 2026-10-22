@@ -393,7 +393,7 @@ pub(crate) fn version_str(version: Version) -> String {
     format!("{version:?}")
 }
 
-fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+pub(super) fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
         .map(|(name, value)| {
