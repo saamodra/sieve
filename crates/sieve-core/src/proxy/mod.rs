@@ -7,6 +7,7 @@
 
 mod capture;
 mod decode;
+mod guard;
 mod io;
 mod peer;
 pub mod replay;
@@ -299,6 +300,9 @@ impl Shared {
 struct Tunnel {
     scheme: Scheme,
     authority: Authority,
+    /// The CONNECT target was already checked by [`guard`], and requests go
+    /// to it; false when the SNI name replaced it, which has to be checked.
+    vetted: bool,
     requests: AtomicUsize,
 }
 
@@ -350,8 +354,16 @@ impl Conn {
             });
         }
         Ok(match self.target(&req) {
-            Some(uri) if is_websocket_upgrade(&req) => self.upgrade(req, uri).await,
-            Some(uri) => self.forward(req, uri).await,
+            Some(uri) => {
+                if let Err(message) = self.guard(&uri).await {
+                    return Ok(self.refuse(&req, &uri, message));
+                }
+                if is_websocket_upgrade(&req) {
+                    self.upgrade(req, uri).await
+                } else {
+                    self.forward(req, uri).await
+                }
+            }
             None => text_response(
                 StatusCode::BAD_REQUEST,
                 "sieve is a proxy: configure it as the HTTP(S) proxy instead of requesting it directly",
@@ -374,6 +386,44 @@ impl Conn {
             None => (req.uri().scheme().is_some() && req.uri().authority().is_some())
                 .then(|| req.uri().clone()),
         }
+    }
+
+    /// Refuses loopback targets for clients that are not on this machine;
+    /// see [`guard`]. Requests inside a tunnel whose target was vetted at
+    /// CONNECT are not checked again.
+    async fn guard(&self, uri: &Uri) -> Result<(), String> {
+        if self.tunnel.as_ref().is_some_and(|t| t.vetted) {
+            return Ok(());
+        }
+        let default_port = if uri.scheme() == Some(&Scheme::HTTPS) {
+            443
+        } else {
+            80
+        };
+        let port = uri.port_u16().unwrap_or(default_port);
+        guard::check(
+            &self.shared.config,
+            self.client,
+            uri.host().unwrap_or_default(),
+            port,
+        )
+        .await
+    }
+
+    /// Answers a request that [`Conn::guard`] refused with a `403`, and
+    /// records it as a flow with an error.
+    fn refuse(&self, req: &Request<Incoming>, uri: &Uri, message: String) -> Response<ProxyBody> {
+        let (kind, url) = if is_websocket_upgrade(req) {
+            (FlowKind::WebSocket, websocket_url(uri))
+        } else {
+            (FlowKind::Http, uri.to_string())
+        };
+        let exchange = self.exchange(kind, req, url);
+        exchange.emit_start();
+        let res = text_response(StatusCode::FORBIDDEN, &message);
+        exchange.set_response(StatusCode::FORBIDDEN.as_u16(), req.version(), res.headers());
+        exchange.finish(None, Some(format!("refused: {message}")));
+        res
     }
 
     fn exchange(&self, kind: FlowKind, req: &Request<Incoming>, url: String) -> Arc<Exchange> {
@@ -516,6 +566,16 @@ impl Conn {
             version: req.version(),
             headers: req.headers().clone(),
         };
+        if let Err(message) = guard::check(
+            &self.shared.config,
+            self.client,
+            head.authority.host(),
+            head.authority.port_u16().unwrap_or(443),
+        )
+        .await
+        {
+            return tunnel::refuse(self, &head, message);
+        }
         if self.quiet || self.shared.is_passthrough(head.authority.host()) {
             return tunnel::passthrough(self.clone(), req, head).await;
         }

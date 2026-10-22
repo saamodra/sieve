@@ -119,6 +119,12 @@ pub struct ProxyConfig {
     /// `ios-sim` uses `/CoreSimulator/` so the Mac's own traffic is left alone.
     /// Connections from other machines are always intercepted.
     pub intercept_processes: Vec<String>,
+    /// Let clients that are not on this machine ask the proxy for loopback
+    /// targets (`127.0.0.1`, `localhost`, `::1`, `0.0.0.0`, or a name that
+    /// resolves only to those), which exposes the Mac's loopback-only
+    /// services to the network. Off by default: such requests get a `403`.
+    /// It does not affect `map_remote` rules, which may point anywhere.
+    pub allow_lan_to_loopback: bool,
 }
 
 impl Default for ProxyConfig {
@@ -129,6 +135,7 @@ impl Default for ProxyConfig {
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             upstream_ca_files: Vec::new(),
             intercept_processes: Vec::new(),
+            allow_lan_to_loopback: false,
         }
     }
 }

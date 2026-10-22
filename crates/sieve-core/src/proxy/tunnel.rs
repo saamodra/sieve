@@ -84,6 +84,7 @@ impl ConnectHead {
         Some(Arc::new(Tunnel {
             scheme,
             authority: authority.parse().ok()?,
+            vetted: sni.is_none_or(|sni| sni.eq_ignore_ascii_case(self.authority.host())),
             requests: Default::default(),
         }))
     }
@@ -100,6 +101,17 @@ async fn connect(addr: &str, limit: Duration) -> Result<TcpStream, String> {
             limit.as_secs_f64()
         )),
     }
+}
+
+/// Answers a CONNECT that the loopback guard refused with a `403`, recorded
+/// as a flow with an error.
+pub(super) fn refuse(conn: &Conn, head: &ConnectHead, message: String) -> Response<ProxyBody> {
+    let exchange = head.exchange(conn, FlowKind::Http);
+    exchange.emit_start();
+    let res = text_response(StatusCode::FORBIDDEN, &message);
+    exchange.set_response(StatusCode::FORBIDDEN.as_u16(), head.version, res.headers());
+    exchange.finish(None, Some(format!("refused: {message}")));
+    res
 }
 
 /// Connects to the target first, so a dead target turns into a 502 for the

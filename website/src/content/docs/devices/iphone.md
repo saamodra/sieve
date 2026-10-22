@@ -15,6 +15,8 @@ The setup page shows a green check once HTTPS traffic arrives.
 
 :::caution[LAN exposure]
 `ios-device setup` makes the proxy and the web UI listen on your local network until you press Ctrl+C. The UI API requires the token printed in the terminal. Run it on a network you trust.
+
+The proxy listens on the Mac's Wi-Fi address only, and it refuses requests from other machines for loopback targets (`localhost`, `127.0.0.1`, `[::1]`, `0.0.0.0`), so services that listen only on the Mac stay private. Rules can still map requests to `localhost`. To let other machines reach the Mac's loopback services through the proxy anyway, set `allow_lan_to_loopback = true` under `[proxy]` in `config.toml`.
 :::
 
 The Mac and the iPhone must be on the same Wi-Fi network.

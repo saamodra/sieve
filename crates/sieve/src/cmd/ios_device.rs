@@ -32,7 +32,10 @@ async fn setup(mut ctx: Context) -> Result<()> {
     let token = ios_device::random_token();
 
     // Explicit LAN opt-in: everything on the Wi-Fi network can reach these ports.
-    ctx.config.proxy.listen = SocketAddr::from(([0, 0, 0, 0], proxy_port));
+    // Bound to the LAN address rather than 0.0.0.0, and the proxy refuses
+    // loopback targets from other machines, so the Mac's loopback-only
+    // services stay private.
+    ctx.config.proxy.listen = SocketAddr::from((ip, proxy_port));
     ctx.config.ui.listen = SocketAddr::from((ip, ui_port));
     ctx.config.ui.token = Some(token.clone());
 
