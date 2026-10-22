@@ -21,7 +21,7 @@ Pause a request, edit it in the UI, then continue or abort.
 
 ## Scripts
 
-For custom request handling, write [Rhai](https://rhai.rs) scripts and put them in the `scripts/` subdirectory of the config directory.
+For custom request handling, write [Rhai](https://rhai.rs) scripts and put them in the `scripts/` subdirectory of the config directory. sieve watches that directory, so adding, editing, or removing a `.rhai` file applies right away, with no restart. If a script has a syntax error, sieve logs it and keeps running the previous set of scripts until you fix it.
 
 ## Finding the config directory
 

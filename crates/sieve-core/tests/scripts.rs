@@ -146,7 +146,7 @@ async fn spawn_sieve(source: &str) -> Sieve {
 async fn spawn_sieve_with(config: ProxyConfig, source: &str) -> Sieve {
     let dir = tempfile::tempdir().unwrap();
     let ca = Arc::new(CertAuthority::load_or_create(&Paths::at(dir.path())).unwrap());
-    let mut engine = ScriptEngine::new();
+    let engine = ScriptEngine::new();
     engine.load_source("test", source).unwrap();
     let flows = flow::channel();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -396,4 +396,52 @@ async fn server_sent_events_stream_past_an_on_response_hook() {
     assert_eq!(read_prefix(&mut res, event.len()).await, event.as_bytes());
     release.send(()).unwrap();
     assert!(res.chunk().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn editing_a_script_changes_the_next_request_without_a_restart() {
+    let upstream = spawn_upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let script = |via: &str| {
+        format!(
+            r#"fn on_request(req) {{
+                req.headers.set_header("x-via", "{via}");
+                req
+            }}"#
+        )
+    };
+    std::fs::write(dir.path().join("a.rhai"), script("v1")).unwrap();
+    let engine = ScriptEngine::for_dir(dir.path().to_path_buf());
+    engine.reload().unwrap();
+    let _watcher = engine.watch().unwrap();
+
+    let ca_dir = tempfile::tempdir().unwrap();
+    let ca = Arc::new(CertAuthority::load_or_create(&Paths::at(ca_dir.path())).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let proxy = Proxy::new(ProxyConfig::default(), ca, flow::channel()).with_scripts(engine);
+    let shutdown = CancellationToken::new();
+    tokio::spawn(proxy.serve(listener, shutdown.clone()));
+    let _guard = shutdown.drop_guard();
+
+    let fetch = || async {
+        client(addr)
+            .get(format!("http://{upstream}/thing"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    };
+    assert_eq!(fetch().await, "/thing via=v1");
+
+    std::fs::write(dir.path().join("a.rhai"), script("v2")).unwrap();
+    timeout(Duration::from_secs(10), async {
+        while fetch().await != "/thing via=v2" {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the edited script is picked up");
 }
