@@ -5,6 +5,14 @@
 //! against every enabled rule in order; the matching rules merge into one
 //! [`Plan`] that the proxy applies.
 //!
+//! Merging is first-match-wins, in file order:
+//!
+//! - `mock`, `map_remote`, `response_status`, `response_body` and `delay_ms`
+//!   come from the first matching rule that sets them (delays do not add up).
+//! - `block` and `breakpoint` are on when any matching rule turns them on.
+//! - A header name (case-insensitive) is decided by the first matching rule
+//!   that sets or removes it, per direction; later rules only add other names.
+//!
 //! ```toml
 //! [[rules]]
 //! name = "local backend"
@@ -17,7 +25,7 @@
 pub mod breakpoint;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -85,7 +93,8 @@ pub struct HeaderMatch {
 
 /// What to do with a matching request. Several parts can combine; when more
 /// than one of `block`, `mock` and `map_remote` is set, the first of that
-/// order wins.
+/// order wins. When several rules match, the first one that sets a value wins
+/// (see the module docs).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Action {
@@ -103,7 +112,8 @@ pub struct Action {
     pub response_status: Option<u16>,
     /// Replaces the response body.
     pub response_body: Option<String>,
-    /// Waits this long before answering.
+    /// Waits this long before answering. The first matching rule that sets it
+    /// decides; delays from several rules do not add up.
     pub delay_ms: Option<u64>,
     /// Holds the request for editing in the UI before it is sent.
     pub breakpoint: bool,
@@ -417,6 +427,9 @@ impl RuleEngine {
                 .map(Path::to_path_buf),
             ..Plan::default()
         };
+        let mut request_headers = HeaderClaims::default();
+        let mut response_headers = HeaderClaims::default();
+        let mut delay = None;
         for compiled in self.snapshot().iter() {
             let rule = &compiled.rule;
             if !rule.enabled || !compiled.matches(req) {
@@ -436,21 +449,62 @@ impl RuleEngine {
             if plan.map_remote.is_none() {
                 plan.map_remote = a.map_remote.clone().filter(|r| !r.trim().is_empty());
             }
-            plan.set_request_headers
-                .extend(a.set_request_headers.clone());
-            plan.remove_request_headers
-                .extend(a.remove_request_headers.clone());
-            plan.set_response_headers
-                .extend(a.set_response_headers.clone());
-            plan.remove_response_headers
-                .extend(a.remove_response_headers.clone());
-            plan.response_status = a.response_status.or(plan.response_status);
-            if a.response_body.is_some() {
+            request_headers.merge(
+                &a.set_request_headers,
+                &a.remove_request_headers,
+                &mut plan.set_request_headers,
+                &mut plan.remove_request_headers,
+            );
+            response_headers.merge(
+                &a.set_response_headers,
+                &a.remove_response_headers,
+                &mut plan.set_response_headers,
+                &mut plan.remove_response_headers,
+            );
+            if plan.response_status.is_none() {
+                plan.response_status = a.response_status;
+            }
+            if plan.response_body.is_none() {
                 plan.response_body.clone_from(&a.response_body);
             }
-            plan.delay += Duration::from_millis(a.delay_ms.unwrap_or(0));
+            if delay.is_none() {
+                delay = a.delay_ms;
+            }
         }
+        plan.delay = Duration::from_millis(delay.unwrap_or(0));
         plan
+    }
+}
+
+/// Header names already decided by an earlier rule, lowercased.
+#[derive(Default)]
+struct HeaderClaims(HashSet<String>);
+
+impl HeaderClaims {
+    /// Adds the names of one rule that no earlier rule claimed, then claims
+    /// them. The proxy removes before it sets, so a name is kept in only one of
+    /// the two lists; within one rule a set still beats a remove.
+    fn merge(
+        &mut self,
+        set: &BTreeMap<String, String>,
+        remove: &[String],
+        out_set: &mut Vec<(String, String)>,
+        out_remove: &mut Vec<String>,
+    ) {
+        let key = |name: &str| name.trim().to_ascii_lowercase();
+        let earlier = self.0.clone();
+        for (name, value) in set {
+            if !earlier.contains(&key(name)) {
+                out_set.push((name.clone(), value.clone()));
+            }
+        }
+        for name in remove {
+            if !earlier.contains(&key(name)) {
+                out_remove.push(name.clone());
+            }
+        }
+        self.0.extend(set.keys().map(|n| key(n)));
+        self.0.extend(remove.iter().map(|n| key(n)));
     }
 }
 
