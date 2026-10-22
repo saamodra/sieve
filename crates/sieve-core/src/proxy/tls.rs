@@ -10,7 +10,7 @@ use rustls::{
 };
 use tracing::debug;
 
-use crate::ca::LeafCert;
+use crate::ca::{CertAuthority, LeafCert};
 
 /// Every config uses ring explicitly, so the result does not depend on which
 /// rustls provider other crates in the build happen to enable.
@@ -28,6 +28,12 @@ pub(crate) fn server_config(leaf: &LeafCert) -> Result<Arc<ServerConfig>> {
         .context("building the TLS server config")?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(Arc::new(config))
+}
+
+/// The cached form of [`server_config`]: one config per host, so repeat
+/// connections share its TLS session cache.
+pub(crate) fn cached_server_config(ca: &CertAuthority, host: &str) -> Result<Arc<ServerConfig>> {
+    ca.server_config_with(host, server_config)
 }
 
 /// How the proxy verifies upstream servers: the Mozilla roots, the OS trust
@@ -50,4 +56,33 @@ pub(crate) fn upstream_config(extra: &[CertificateDer<'static>]) -> Result<Clien
         .with_safe_default_protocol_versions()?
         .with_root_certificates(roots)
         .with_no_client_auth())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Paths;
+
+    fn ca_in(dir: &tempfile::TempDir) -> CertAuthority {
+        CertAuthority::load_or_create(&Paths::at(dir.path())).unwrap()
+    }
+
+    #[test]
+    fn server_configs_are_cached_per_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = ca_in(&dir);
+        let a = cached_server_config(&ca, "a.example").unwrap();
+        assert!(Arc::ptr_eq(
+            &a,
+            &cached_server_config(&ca, "a.example").unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &a,
+            &cached_server_config(&ca, "A.example.").unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            &a,
+            &cached_server_config(&ca, "b.example").unwrap()
+        ));
+    }
 }

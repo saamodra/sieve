@@ -35,6 +35,10 @@ use crate::flow::FlowKind;
 /// as an opaque protocol where the server speaks first.
 const SNIFF_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long to wait for a raw tunnel's target to accept the connection. Matches
+/// the connect timeout of the HTTP upstream client in `proxy/mod.rs`.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub(super) struct ConnectHead {
     pub authority: Authority,
     pub version: Version,
@@ -85,6 +89,19 @@ impl ConnectHead {
     }
 }
 
+/// Connects to `addr`, failing with a "timed out" message once `limit` passes
+/// instead of waiting for the OS default.
+async fn connect(addr: &str, limit: Duration) -> Result<TcpStream, String> {
+    match tokio::time::timeout(limit, TcpStream::connect(addr)).await {
+        Ok(Ok(server)) => Ok(server),
+        Ok(Err(e)) => Err(format!("connecting to {addr} failed: {e}")),
+        Err(_) => Err(format!(
+            "connecting to {addr} timed out after {}s",
+            limit.as_secs_f64()
+        )),
+    }
+}
+
 /// Connects to the target first, so a dead target turns into a 502 for the
 /// client, then relays bytes without looking at them.
 pub(super) async fn passthrough(
@@ -94,10 +111,9 @@ pub(super) async fn passthrough(
 ) -> Response<ProxyBody> {
     let exchange = head.exchange(&conn, FlowKind::Passthrough);
     exchange.emit_start();
-    let server = match TcpStream::connect(head.addr()).await {
+    let server = match connect(&head.addr(), CONNECT_TIMEOUT).await {
         Ok(server) => server,
-        Err(e) => {
-            let message = format!("connecting to {} failed: {e}", head.addr());
+        Err(message) => {
             exchange.finish(None, Some(message.clone()));
             return text_response(StatusCode::BAD_GATEWAY, &message);
         }
@@ -138,15 +154,12 @@ pub(super) async fn intercept(conn: Conn, upgraded: Upgraded, head: ConnectHead)
         _ => {
             let exchange = head.exchange(&conn, FlowKind::Passthrough);
             exchange.emit_start();
-            match TcpStream::connect(head.addr()).await {
+            match connect(&head.addr(), CONNECT_TIMEOUT).await {
                 Ok(server) => {
                     exchange.set_response(StatusCode::OK.as_u16(), head.version, &HeaderMap::new());
                     relay(&conn, io, server, &exchange).await;
                 }
-                Err(e) => {
-                    let message = format!("connecting to {} failed: {e}", head.addr());
-                    exchange.finish(None, Some(message));
-                }
+                Err(message) => exchange.finish(None, Some(message)),
             }
         }
     }
@@ -168,12 +181,7 @@ where
     };
     let sni = start.client_hello().server_name().map(str::to_string);
     let host = sni.as_deref().unwrap_or(head.authority.host());
-    let config = match conn
-        .shared
-        .ca
-        .leaf(host)
-        .and_then(|leaf| tls::server_config(&leaf))
-    {
+    let config = match tls::cached_server_config(&conn.shared.ca, host) {
         Ok(config) => config,
         Err(e) => return tls_failed(&conn, &head, format!("no certificate for {host}: {e:#}")),
     };
@@ -249,4 +257,39 @@ where
     let down = client.written.load(Ordering::Relaxed);
     exchange.request_body_done(Captured::opaque(up), None);
     exchange.finish(Some(Captured::opaque(down)), None);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_times_out_against_a_blackholed_address() {
+        let start = Instant::now();
+        let err = connect("10.255.255.1:81", Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        // Some sandboxes reject unroutable addresses outright; either way it
+        // must fail fast, and a timeout must say so.
+        assert!(start.elapsed() < Duration::from_secs(2), "{err}");
+        assert!(err.contains("timed out") || err.contains("failed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn connect_reaches_a_listening_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        assert!(connect(&addr, Duration::from_secs(5)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn connect_reports_refused_connections() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let err = connect(&addr, Duration::from_secs(5)).await.unwrap_err();
+        assert!(err.contains("failed"), "{err}");
+    }
 }

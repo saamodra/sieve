@@ -16,7 +16,10 @@ use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PublicKeyData, SanType,
 };
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::{
+    ServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+};
 use sha2::Sha256;
 use time::{Duration, OffsetDateTime};
 use tracing::{info, warn};
@@ -33,6 +36,10 @@ const LEAF_VALIDITY: Duration = Duration::days(365);
 /// Backdating for devices whose clock runs a little behind.
 const BACKDATE: Duration = Duration::days(1);
 const LEAF_CACHE_SIZE: usize = 1024;
+
+/// A TLS server config built from a leaf, kept with that leaf so a re-signed
+/// leaf invalidates it.
+type CachedServerConfig = (Arc<LeafCert>, Arc<ServerConfig>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -59,6 +66,7 @@ pub struct CertAuthority {
     not_before: OffsetDateTime,
     not_after: OffsetDateTime,
     leaves: Mutex<LruCache<String, Arc<LeafCert>>>,
+    server_configs: Mutex<LruCache<String, CachedServerConfig>>,
 }
 
 impl CertAuthority {
@@ -145,6 +153,34 @@ impl CertAuthority {
             .expect("leaf cache poisoned")
             .put(host, leaf.clone());
         Ok(leaf)
+    }
+
+    /// Returns the TLS server config for `host`, calling `build` with the
+    /// host's leaf on a cache miss. Reusing one config per host keeps its
+    /// session cache, so clients can resume sessions instead of doing a full
+    /// handshake every time.
+    pub fn server_config_with(
+        &self,
+        host: &str,
+        build: impl FnOnce(&LeafCert) -> Result<Arc<ServerConfig>>,
+    ) -> Result<Arc<ServerConfig>> {
+        let leaf = self.leaf(host)?;
+        let host = normalize_host(host);
+        if let Some((cached_leaf, config)) = self
+            .server_configs
+            .lock()
+            .expect("server config cache poisoned")
+            .get(&host)
+            && Arc::ptr_eq(cached_leaf, &leaf)
+        {
+            return Ok(config.clone());
+        }
+        let config = build(&leaf)?;
+        self.server_configs
+            .lock()
+            .expect("server config cache poisoned")
+            .put(host, (leaf, config.clone()));
+        Ok(config)
     }
 
     fn sign_leaf(&self, host: &str) -> Result<LeafCert> {
@@ -244,6 +280,9 @@ impl CertAuthority {
             not_before,
             not_after,
             leaves: Mutex::new(LruCache::new(
+                NonZeroUsize::new(LEAF_CACHE_SIZE).expect("non-zero"),
+            )),
+            server_configs: Mutex::new(LruCache::new(
                 NonZeroUsize::new(LEAF_CACHE_SIZE).expect("non-zero"),
             )),
         })
