@@ -171,6 +171,7 @@ async fn mock_and_block_answer_without_the_server() {
                     headers: [("x-mock".to_string(), "1".to_string())].into(),
                     body: Some("teapot".into()),
                     body_file: None,
+                    ..Mock::default()
                 }),
                 ..Action::default()
             },

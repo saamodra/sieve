@@ -97,7 +97,17 @@ pub async fn run(ctx: Context, args: AndroidArgs) -> Result<()> {
         } => {
             let device = mode1::select_device(&adb, serial).await?;
             let host = frida::FridaCli::default();
-            frida::run(&adb, &host, Some(&device), &package, &frida_server).await
+            // The frida session blocks until it ends; Ctrl+C or SIGTERM ends
+            // it early. Either way `run_until` stops frida-server on exit.
+            frida::run_until(
+                &adb,
+                &host,
+                Some(&device),
+                &package,
+                &frida_server,
+                shutdown_signal(),
+            )
+            .await
         }
         AndroidCommand::Vpn => {
             ensure_port_free(ctx.config.proxy.listen)?;
@@ -118,4 +128,25 @@ pub async fn run(ctx: Context, args: AndroidArgs) -> Result<()> {
             result.and(cleanup)
         }
     }
+}
+
+/// Ctrl+C, plus SIGTERM and SIGHUP on Unix, so a `kill` or a closed terminal
+/// still stops the root `frida-server` left running on the device.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let (Ok(mut term), Ok(mut hup)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::hangup()),
+        ) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+                _ = hup.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }

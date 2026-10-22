@@ -114,6 +114,10 @@ pub struct Action {
 pub struct Mock {
     pub status: u16,
     pub headers: BTreeMap<String, String>,
+    /// Headers added after `headers`, in order, so a name can repeat (two
+    /// `Set-Cookie`, say).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub header_list: Vec<(String, String)>,
     pub body: Option<String>,
     /// Read on every request; relative paths are relative to the rules file.
     pub body_file: Option<PathBuf>,
@@ -124,6 +128,7 @@ impl Default for Mock {
         Self {
             status: 200,
             headers: BTreeMap::new(),
+            header_list: Vec::new(),
             body: None,
             body_file: None,
         }
@@ -498,3 +503,45 @@ fn render(path: &Path, rules: &[Rule]) -> Result<String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod header_list_tests {
+    use super::*;
+
+    const OLD: &str = r#"
+[[rules]]
+name = "mock"
+[rules.match]
+host = "a.test"
+[rules.action.mock]
+status = 201
+headers = { x-one = "1" }
+body = "hi"
+"#;
+
+    #[test]
+    fn a_mock_without_header_list_parses_and_round_trips() {
+        let rules = parse(Path::new("rules.toml"), OLD).unwrap();
+        let mock = rules[0].action.mock.as_ref().unwrap();
+        assert!(mock.header_list.is_empty());
+
+        let json = serde_json::to_value(&rules[0]).unwrap();
+        assert!(json["action"]["mock"].get("header_list").is_none());
+        let back: Rule = serde_json::from_value(json).unwrap();
+        assert_eq!(back, rules[0]);
+    }
+
+    #[test]
+    fn header_list_round_trips_through_json_and_toml() {
+        let mut rules = parse(Path::new("rules.toml"), OLD).unwrap();
+        rules[0].action.mock.as_mut().unwrap().header_list = vec![
+            ("set-cookie".into(), "a=1".into()),
+            ("set-cookie".into(), "b=2".into()),
+        ];
+        for name in ["rules.json", "rules.toml"] {
+            let path = Path::new(name);
+            let text = render(path, &rules).unwrap();
+            assert_eq!(parse(path, &text).unwrap(), rules, "{name}");
+        }
+    }
+}

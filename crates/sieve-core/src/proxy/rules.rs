@@ -90,36 +90,13 @@ pub(super) async fn forward(
     }
 
     let body: ProxyBody = match (&conn.shared.rules, plan.breakpoint) {
-        (Some(engine), true) => {
-            let mut bytes = match body.collect().await {
-                Ok(collected) => collected.to_bytes(),
-                Err(e) => {
-                    let message = format!("reading the request body failed: {e}");
-                    exchange.finish(None, Some(message.clone()));
-                    return text_response(StatusCode::BAD_REQUEST, &message);
-                }
-            };
-            match hold(engine, &exchange, &parts, &bytes).await {
-                Decision::Abort => {
-                    let _ = CaptureBody::new(Full::new(bytes), Side::Request, exchange.clone())
-                        .collect()
-                        .await;
-                    exchange.finish(None, Some("aborted at a breakpoint".to_string()));
-                    return text_response(
-                        StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_GATEWAY),
-                        "request aborted at a breakpoint",
-                    );
-                }
-                Decision::Continue(edit) => apply_edit(&mut parts, &mut bytes, edit),
+        (Some(engine), true) => match hold_request(engine, &exchange, &mut parts, body).await {
+            Ok(body) => {
+                changed = true;
+                body
             }
-            changed = true;
-            if parts.headers.contains_key(header::CONTENT_LENGTH) || !bytes.is_empty() {
-                parts
-                    .headers
-                    .insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
-            }
-            CaptureBody::new(Full::new(bytes), Side::Request, exchange.clone()).boxed_unsync()
-        }
+            Err(res) => return *res,
+        },
         _ => CaptureBody::new(body, Side::Request, exchange.clone()).boxed_unsync(),
     };
 
@@ -143,7 +120,86 @@ pub(super) async fn forward(
     }
 }
 
-async fn hold(engine: &RuleEngine, exchange: &Exchange, parts: &Parts, body: &Bytes) -> Decision {
+/// Holds the request at a breakpoint and returns the body to send on, or the
+/// response that ends the exchange when the user aborts or the body cannot be
+/// read. Only bodies of at most `max_body` bytes are buffered and editable;
+/// a larger one is held without its body and streams through unchanged.
+async fn hold_request<B>(
+    engine: &RuleEngine,
+    exchange: &Arc<Exchange>,
+    parts: &mut Parts,
+    body: B,
+) -> Result<ProxyBody, Box<Response<ProxyBody>>>
+where
+    B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Into<BoxError>,
+{
+    match buffer(body, exchange.max_body()).await {
+        Ok(Buffered::Whole(mut bytes)) => {
+            let held = HeldBody {
+                text: std::str::from_utf8(&bytes).ok().map(str::to_string),
+                size: bytes.len(),
+            };
+            match hold(engine, exchange, parts, held).await {
+                Decision::Abort => {
+                    let _ = CaptureBody::new(Full::new(bytes), Side::Request, exchange.clone())
+                        .collect()
+                        .await;
+                    return Err(Box::new(aborted(exchange)));
+                }
+                Decision::Continue(edit) => apply_edit(parts, &mut bytes, edit),
+            }
+            if parts.headers.contains_key(header::CONTENT_LENGTH) || !bytes.is_empty() {
+                parts
+                    .headers
+                    .insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
+            }
+            Ok(CaptureBody::new(Full::new(bytes), Side::Request, exchange.clone()).boxed_unsync())
+        }
+        Ok(Buffered::Stream(body)) => {
+            let held = HeldBody {
+                text: None,
+                size: usize::try_from(body.size_hint().lower()).unwrap_or(usize::MAX),
+            };
+            let body = CaptureBody::new(body, Side::Request, exchange.clone());
+            match hold(engine, exchange, parts, held).await {
+                Decision::Abort => {
+                    drop(body);
+                    Err(Box::new(aborted(exchange)))
+                }
+                Decision::Continue(mut edit) => {
+                    // The body was not shown, so there is nothing to edit.
+                    edit.body = None;
+                    apply_edit(parts, &mut Bytes::new(), edit);
+                    Ok(body.boxed_unsync())
+                }
+            }
+        }
+        Err(e) => {
+            let e: BoxError = e.into();
+            let message = format!("reading the request body failed: {e}");
+            exchange.finish(None, Some(message.clone()));
+            Err(Box::new(text_response(StatusCode::BAD_REQUEST, &message)))
+        }
+    }
+}
+
+fn aborted(exchange: &Exchange) -> Response<ProxyBody> {
+    exchange.finish(None, Some("aborted at a breakpoint".to_string()));
+    text_response(
+        StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_GATEWAY),
+        "request aborted at a breakpoint",
+    )
+}
+
+/// What the user sees of the held request's body.
+struct HeldBody {
+    /// `None` when the body is not UTF-8 or was too large to buffer.
+    text: Option<String>,
+    size: usize,
+}
+
+async fn hold(engine: &RuleEngine, exchange: &Exchange, parts: &Parts, body: HeldBody) -> Decision {
     engine
         .breakpoints()
         .hold(HeldRequest {
@@ -151,8 +207,8 @@ async fn hold(engine: &RuleEngine, exchange: &Exchange, parts: &Parts, body: &By
             method: parts.method.to_string(),
             url: parts.uri.to_string(),
             headers: header_pairs(&parts.headers),
-            body: std::str::from_utf8(body).ok().map(str::to_string),
-            body_size: body.len(),
+            body: body.text,
+            body_size: body.size,
             timeout_secs: 0,
         })
         .await
@@ -220,6 +276,18 @@ pub(super) fn apply_headers(headers: &mut HeaderMap, set: &[(String, String)], r
     }
 }
 
+/// Adds `list` after what is already in `headers`, keeping repeated names.
+fn append_headers(headers: &mut HeaderMap, list: &[(String, String)]) {
+    for (name, value) in list {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.trim().as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            headers.append(name, value);
+        }
+    }
+}
+
 /// Points `uri` at `target` (`host:port` or a URL), keeping the path and query.
 pub(super) fn remap(uri: &Uri, target: &str) -> Option<Uri> {
     let target = target.trim();
@@ -252,6 +320,7 @@ pub(super) async fn synthetic(
                 &mock.headers.clone().into_iter().collect::<Vec<_>>(),
                 &[],
             );
+            append_headers(&mut headers, &mock.header_list);
             match mock_body(mock, plan.base_dir.as_deref()).await {
                 Ok(body) => (
                     StatusCode::from_u16(mock.status).unwrap_or(StatusCode::OK),
@@ -713,5 +782,143 @@ mod tests {
         assert_eq!(parts.uri.to_string(), "http://a.test/");
         assert_eq!(parts.headers.len(), 1);
         assert_eq!(body, "new");
+    }
+
+    use std::net::SocketAddr;
+
+    use crate::{
+        flow::{self, FlowKind},
+        proxy::capture::RequestHead,
+        rules::Mock,
+    };
+
+    fn exchange(flows: flow::FlowSender, max_body: usize) -> Arc<Exchange> {
+        let head = RequestHead {
+            method: "POST",
+            url: "http://a.test/upload".to_string(),
+            version: Version::HTTP_11,
+            headers: &HeaderMap::new(),
+        };
+        let client = SocketAddr::from(([127, 0, 0, 1], 1));
+        Exchange::new(7, client, FlowKind::Http, head, flows, max_body)
+    }
+
+    fn post_parts() -> Parts {
+        let (mut parts, _) = Request::new(()).into_parts();
+        parts.method = Method::POST;
+        parts.uri = "http://a.test/upload".parse().unwrap();
+        parts
+    }
+
+    /// Resolves the next held request with `decision` and returns what the UI saw.
+    fn resolve_next(
+        engine: &Arc<RuleEngine>,
+        decision: Decision,
+    ) -> tokio::task::JoinHandle<HeldRequest> {
+        let engine = engine.clone();
+        let mut events = engine.breakpoints().subscribe();
+        tokio::spawn(async move {
+            loop {
+                if let Ok(crate::rules::breakpoint::BreakpointEvent::Held { request }) =
+                    events.recv().await
+                {
+                    assert!(engine.breakpoints().resolve(request.id, decision));
+                    return request;
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn an_oversized_body_is_held_without_its_body_and_sent_whole() {
+        let engine = RuleEngine::new(None);
+        let flows = flow::channel();
+        let exchange = exchange(flows, 8);
+        let original = Bytes::from_static(b"0123456789abcdef");
+        let mut parts = post_parts();
+
+        let edit = RequestEdit {
+            method: Some("PUT".into()),
+            body: Some("ignored".into()),
+            ..RequestEdit::default()
+        };
+        let seen = resolve_next(&engine, Decision::Continue(edit));
+        let body = hold_request(&engine, &exchange, &mut parts, Full::new(original.clone()))
+            .await
+            .unwrap();
+
+        let held = seen.await.unwrap();
+        assert_eq!(held.body, None);
+        assert_eq!(held.body_size, original.len());
+        assert_eq!(parts.method, Method::PUT);
+        assert_eq!(body.collect().await.unwrap().to_bytes(), original);
+    }
+
+    #[tokio::test]
+    async fn a_small_body_is_still_editable() {
+        let engine = RuleEngine::new(None);
+        let exchange = exchange(flow::channel(), 8);
+        let mut parts = post_parts();
+
+        let edit = RequestEdit {
+            body: Some("changed".into()),
+            ..RequestEdit::default()
+        };
+        let seen = resolve_next(&engine, Decision::Continue(edit));
+        let body = hold_request(&engine, &exchange, &mut parts, Full::new("abc".into()))
+            .await
+            .unwrap();
+
+        let held = seen.await.unwrap();
+        assert_eq!(held.body.as_deref(), Some("abc"));
+        assert_eq!(held.body_size, 3);
+        assert_eq!(body.collect().await.unwrap().to_bytes(), "changed");
+    }
+
+    #[tokio::test]
+    async fn aborting_an_oversized_body_records_the_flow() {
+        let engine = RuleEngine::new(None);
+        let flows = flow::channel();
+        let mut rx = flows.subscribe();
+        let exchange = exchange(flows, 4);
+        let mut parts = post_parts();
+
+        let seen = resolve_next(&engine, Decision::Abort);
+        let res = hold_request(
+            &engine,
+            &exchange,
+            &mut parts,
+            Full::new(Bytes::from_static(b"far too long")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(res.status().as_u16(), 499);
+        assert_eq!(seen.await.unwrap().body, None);
+
+        drop(exchange);
+        let flow = rx.recv().await.unwrap();
+        assert_eq!(flow.error.as_deref(), Some("aborted at a breakpoint"));
+    }
+
+    #[tokio::test]
+    async fn a_mock_sends_repeated_headers_from_header_list() {
+        let flows = flow::channel();
+        let exchange = exchange(flows, 1024);
+        let plan = Plan {
+            mock: Some(Mock {
+                headers: [("x-one".to_string(), "1".to_string())].into(),
+                header_list: vec![
+                    ("Set-Cookie".into(), "a=1".into()),
+                    ("Set-Cookie".into(), "b=2".into()),
+                ],
+                body: Some("ok".into()),
+                ..Mock::default()
+            }),
+            ..Plan::default()
+        };
+        let res = synthetic(&plan, exchange, Version::HTTP_11).await;
+        let cookies: Vec<_> = res.headers().get_all(header::SET_COOKIE).iter().collect();
+        assert_eq!(cookies, ["a=1", "b=2"]);
+        assert_eq!(res.headers()["x-one"], "1");
     }
 }

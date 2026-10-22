@@ -18,6 +18,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use tokio::process::Command;
+use tracing::warn;
 use uuid::Uuid;
 
 use super::{AndroidBridge, system_ca};
@@ -26,6 +27,8 @@ use super::{AndroidBridge, system_ca};
 pub const UNPINNING_SCRIPT: &str = include_str!("../../../../scripts/frida/android-unpinning.js");
 
 const REMOTE_SERVER: &str = "/data/local/tmp/sieve-frida-server";
+/// `REMOTE_SERVER` as a regex that does not match its own source text.
+const KILL_PATTERN: &str = "/data/local/tmp/[s]ieve-frida-server";
 /// How long to give `frida-server` to come up and start listening.
 const START_RETRIES: u32 = 10;
 const START_RETRY_DELAY: Duration = Duration::from_millis(300);
@@ -141,7 +144,11 @@ pub async fn is_server_running<B: AndroidBridge>(bridge: &B, serial: Option<&str
 
 /// Starts the previously-pushed `frida-server` as root, backgrounded so the
 /// `adb shell` call returns. Waits until it shows up in the process list.
+/// Does nothing if a `sieve-frida-server` is already running.
 pub async fn start_server<B: AndroidBridge>(bridge: &B, serial: Option<&str>) -> Result<()> {
+    if is_server_running(bridge, serial).await? {
+        return Ok(());
+    }
     let root = system_ca::acquire_root(bridge, serial)
         .await
         .map_err(|_| anyhow::anyhow!(NO_ROOT))?;
@@ -162,13 +169,22 @@ pub async fn start_server<B: AndroidBridge>(bridge: &B, serial: Option<&str>) ->
     bail!("frida-server did not show up in the process list after starting it")
 }
 
-/// Stops the device-side `frida-server`. Best effort: errors are ignored by
-/// callers that run this during teardown.
+/// Stops the device-side `frida-server`. It was started as root, so the kill
+/// needs the same root access. Best effort: errors are ignored by callers
+/// that run this during teardown.
 pub async fn stop_server<B: AndroidBridge>(bridge: &B, serial: Option<&str>) -> Result<()> {
+    let root = system_ca::acquire_root(bridge, serial)
+        .await
+        .map_err(|_| anyhow::anyhow!(NO_ROOT))?;
+    // `pkill -f` also sees the wrapping shell's command line, which holds the
+    // pattern; the `[s]` makes the pattern match the server's path but not
+    // its own text.
+    let kill = format!("pkill -f \"{}\"", KILL_PATTERN);
     bridge
-        .shell(serial, "pkill -f sieve-frida-server")
+        .shell(serial, &root.wrap(&kill))
         .await
         .map(|_| ())
+        .context("stopping frida-server")
 }
 
 /// Runs an app on the host side with a Frida script attached, via the
@@ -176,8 +192,9 @@ pub async fn stop_server<B: AndroidBridge>(bridge: &B, serial: Option<&str>) -> 
 /// Mocked in tests behind this trait.
 pub trait FridaHost: Send + Sync {
     /// Spawns `package` (suspended), attaches `script`, and lets it run.
-    /// Returns once the app has been spawned and the script loaded; the app
-    /// itself keeps running until the device session ends.
+    /// Returns when the Frida session ends (the `frida` REPL exits or the
+    /// app dies), so the device-side `frida-server` must stay up until then.
+    /// Dropping the future abandons the session.
     fn spawn(
         &self,
         serial: Option<&str>,
@@ -203,6 +220,8 @@ impl Default for FridaCli {
 impl FridaHost for FridaCli {
     async fn spawn(&self, serial: Option<&str>, package: &str, script: &Path) -> Result<()> {
         let mut cmd = Command::new(&self.program);
+        // Dropping the future (shutdown signal) must not leave `frida` behind.
+        cmd.kill_on_drop(true);
         cmd.arg("-U");
         if let Some(serial) = serial {
             cmd.args(["-D", serial]);
@@ -247,6 +266,7 @@ impl Drop for ScriptFile {
 
 /// Full workflow: verify the binary matches the device's ABI, push and start
 /// `frida-server`, then spawn `package` with the unpinning script attached.
+/// Blocks until the Frida session ends, then stops `frida-server`.
 pub async fn run<B: AndroidBridge, H: FridaHost>(
     bridge: &B,
     host: &H,
@@ -254,12 +274,51 @@ pub async fn run<B: AndroidBridge, H: FridaHost>(
     package: &str,
     frida_server: &Path,
 ) -> Result<()> {
+    run_until(
+        bridge,
+        host,
+        serial,
+        package,
+        frida_server,
+        std::future::pending(),
+    )
+    .await
+}
+
+/// Like [`run`], but also ends the session when `shutdown` completes (e.g. on
+/// Ctrl+C). `frida-server` is stopped on every exit path once it was started:
+/// session end, shutdown, or a failure to spawn the app.
+pub async fn run_until<B: AndroidBridge, H: FridaHost>(
+    bridge: &B,
+    host: &H,
+    serial: Option<&str>,
+    package: &str,
+    frida_server: &Path,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
     let abi = device_abi(bridge, serial).await?;
     check_binary_abi(frida_server, abi)?;
+    // A leftover server holds the binary open, which would fail the push, and
+    // may not match the host's frida version.
+    if is_server_running(bridge, serial).await? {
+        let _ = stop_server(bridge, serial).await;
+    }
     push_server(bridge, serial, frida_server).await?;
-    start_server(bridge, serial).await?;
-    let script = ScriptFile::write()?;
-    host.spawn(serial, package, &script.0).await
+
+    let session = async {
+        start_server(bridge, serial).await?;
+        let script = ScriptFile::write()?;
+        tokio::select! {
+            result = host.spawn(serial, package, &script.0) => result,
+            () = shutdown => Ok(()),
+        }
+    }
+    .await;
+
+    if let Err(e) = stop_server(bridge, serial).await {
+        warn!("could not stop frida-server on the device: {e:#}");
+    }
+    session
 }
 
 #[cfg(test)]
@@ -324,13 +383,24 @@ mod tests {
         abi: &'static str,
         already_root: bool,
         su_works: bool,
+        /// Number of `ps` polls that still miss the server after it starts.
         becomes_running_after: Mutex<u32>,
+        started: Mutex<bool>,
+        /// Whether a server process exists; set to `true` for a leftover one.
+        running: Mutex<bool>,
         calls: Mutex<Vec<String>>,
     }
 
     impl MockBridge {
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
+        }
+
+        fn kills(&self) -> Vec<String> {
+            self.calls()
+                .into_iter()
+                .filter(|c| c.contains("pkill"))
+                .collect()
         }
     }
 
@@ -358,20 +428,27 @@ mod tests {
                 "su -c 'id -u'" if self.su_works => Ok("0\n".into()),
                 "su -c 'id -u'" => bail!("su: inaccessible or not found"),
                 c if c.starts_with("chmod 755") => Ok(String::new()),
-                c if c.starts_with("nohup") || c.contains("sieve-frida-server >/dev/null") => {
+                c if c.starts_with("nohup") || c.starts_with("su -c 'nohup") => {
+                    *self.started.lock().unwrap() = true;
                     Ok(String::new())
                 }
-                c if c.starts_with("su -c 'nohup") => Ok(String::new()),
                 "ps -A 2>/dev/null | grep -c sieve-frida-server" => {
-                    let mut left = self.becomes_running_after.lock().unwrap();
-                    if *left == 0 {
-                        Ok("1\n".into())
-                    } else {
-                        *left -= 1;
-                        Ok("0\n".into())
+                    let mut running = self.running.lock().unwrap();
+                    if *self.started.lock().unwrap() && !*running {
+                        let mut left = self.becomes_running_after.lock().unwrap();
+                        if *left == 0 {
+                            *running = true;
+                        } else {
+                            *left -= 1;
+                        }
                     }
+                    Ok(if *running { "1\n" } else { "0\n" }.into())
                 }
-                "pkill -f sieve-frida-server" => Ok(String::new()),
+                c if c.contains("pkill -f \"/data/local/tmp/[s]ieve-frida-server\"") => {
+                    *self.running.lock().unwrap() = false;
+                    *self.started.lock().unwrap() = false;
+                    Ok(String::new())
+                }
                 other => bail!("unexpected shell call: {other:?}"),
             }
         }
@@ -395,6 +472,30 @@ mod tests {
             ));
             Ok(())
         }
+    }
+
+    /// A host whose `spawn` fails, as when `frida` is not installed.
+    struct FailingHost;
+
+    impl FridaHost for FailingHost {
+        async fn spawn(&self, _: Option<&str>, _: &str, _: &Path) -> Result<()> {
+            bail!("frida: command not found")
+        }
+    }
+
+    /// A host whose session never ends on its own.
+    struct HangingHost;
+
+    impl FridaHost for HangingHost {
+        async fn spawn(&self, _: Option<&str>, _: &str, _: &Path) -> Result<()> {
+            std::future::pending().await
+        }
+    }
+
+    fn server_binary(dir: &tempfile::TempDir) -> PathBuf {
+        let server = dir.path().join("frida-server");
+        fs::write(&server, elf_stub(183)).unwrap();
+        server
     }
 
     #[tokio::test]
@@ -492,9 +593,149 @@ mod tests {
     async fn is_server_running_parses_the_grep_count() {
         let bridge = MockBridge {
             abi: "arm64-v8a",
-            becomes_running_after: Mutex::new(0),
+            running: Mutex::new(true),
             ..Default::default()
         };
         assert!(is_server_running(&bridge, None).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn stop_server_kills_as_root_over_adb_root() {
+        let bridge = MockBridge {
+            already_root: true,
+            running: Mutex::new(true),
+            ..Default::default()
+        };
+        stop_server(&bridge, Some("emu")).await.unwrap();
+        assert_eq!(
+            bridge.kills(),
+            ["shell pkill -f \"/data/local/tmp/[s]ieve-frida-server\""]
+        );
+        assert!(!is_server_running(&bridge, None).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn stop_server_wraps_the_kill_in_su() {
+        let bridge = MockBridge {
+            su_works: true,
+            running: Mutex::new(true),
+            ..Default::default()
+        };
+        stop_server(&bridge, Some("emu")).await.unwrap();
+        assert_eq!(
+            bridge.kills(),
+            ["shell su -c 'pkill -f \"/data/local/tmp/[s]ieve-frida-server\"'"]
+        );
+        assert!(!is_server_running(&bridge, None).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn stop_server_fails_without_root() {
+        let bridge = MockBridge::default();
+        let err = stop_server(&bridge, None).await.unwrap_err().to_string();
+        assert!(err.contains("needs root"), "{err}");
+        assert!(bridge.kills().is_empty());
+    }
+
+    #[tokio::test]
+    async fn start_server_skips_starting_when_already_running() {
+        let bridge = MockBridge {
+            already_root: true,
+            running: Mutex::new(true),
+            ..Default::default()
+        };
+        start_server(&bridge, Some("emu")).await.unwrap();
+        assert!(!bridge.calls().iter().any(|c| c.contains("nohup")));
+    }
+
+    #[tokio::test]
+    async fn run_stops_the_server_after_the_session_ends() {
+        let bridge = MockBridge {
+            abi: "arm64-v8a",
+            already_root: true,
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        run(
+            &bridge,
+            &MockHost::default(),
+            Some("emu"),
+            "com.example.app",
+            &server_binary(&dir),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bridge.kills().len(), 1);
+        assert!(!*bridge.running.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_stops_the_server_when_spawn_fails() {
+        let bridge = MockBridge {
+            abi: "arm64-v8a",
+            already_root: true,
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let err = run(
+            &bridge,
+            &FailingHost,
+            Some("emu"),
+            "com.example.app",
+            &server_binary(&dir),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("command not found"), "{err}");
+        assert_eq!(bridge.kills().len(), 1);
+        assert!(!*bridge.running.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_until_stops_the_server_on_shutdown() {
+        let bridge = MockBridge {
+            abi: "arm64-v8a",
+            already_root: true,
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        run_until(
+            &bridge,
+            &HangingHost,
+            Some("emu"),
+            "com.example.app",
+            &server_binary(&dir),
+            std::future::ready(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bridge.kills().len(), 1);
+        assert!(!*bridge.running.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_replaces_a_leftover_server_before_pushing() {
+        let bridge = MockBridge {
+            abi: "arm64-v8a",
+            already_root: true,
+            running: Mutex::new(true),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        run(
+            &bridge,
+            &MockHost::default(),
+            Some("emu"),
+            "com.example.app",
+            &server_binary(&dir),
+        )
+        .await
+        .unwrap();
+        let calls = bridge.calls();
+        let first_kill = calls.iter().position(|c| c.contains("pkill")).unwrap();
+        let push = calls.iter().position(|c| c.starts_with("push")).unwrap();
+        let start = calls.iter().position(|c| c.contains("nohup")).unwrap();
+        assert!(first_kill < push && push < start, "{calls:?}");
     }
 }
