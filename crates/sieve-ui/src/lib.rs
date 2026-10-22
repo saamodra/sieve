@@ -27,6 +27,16 @@ use store::{DEFAULT_MAX_FLOWS, FlowStore};
 
 const EVENT_CAPACITY: usize = 4096;
 
+/// What [`serve_with_options`] adds to the plain UI.
+#[derive(Default)]
+pub struct ServeOptions {
+    /// With rules the UI can edit them and answer breakpoints.
+    pub rules: Option<Arc<RuleEngine>>,
+    /// Replays requests, so replays trust the proxy's extra upstream roots and
+    /// honour its body limit. Defaults to a replayer with neither.
+    pub replayer: Option<Replayer>,
+}
+
 /// Serves the API and UI on `config.listen` until `shutdown` is cancelled.
 /// `extra_routes` (device setup pages) are merged into the app.
 ///
@@ -40,7 +50,14 @@ pub async fn serve(
     extra_routes: Router,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    serve_with_rules(config, flows, extra_routes, shutdown, None).await
+    serve_with_options(
+        config,
+        flows,
+        extra_routes,
+        shutdown,
+        ServeOptions::default(),
+    )
+    .await
 }
 
 /// Like [`serve`], and with `rules` the UI can edit rules and answer
@@ -52,8 +69,11 @@ pub async fn serve_with_rules(
     shutdown: CancellationToken,
     rules: Option<Arc<RuleEngine>>,
 ) -> Result<()> {
-    let replayer = Replayer::new(&[], DEFAULT_MAX_BODY_BYTES)?;
-    serve_with_replayer(config, flows, extra_routes, shutdown, rules, replayer).await
+    let options = ServeOptions {
+        rules,
+        ..ServeOptions::default()
+    };
+    serve_with_options(config, flows, extra_routes, shutdown, options).await
 }
 
 /// Like [`serve_with_rules`], replaying requests with `replayer`, so replays
@@ -66,6 +86,21 @@ pub async fn serve_with_replayer(
     rules: Option<Arc<RuleEngine>>,
     replayer: Replayer,
 ) -> Result<()> {
+    let options = ServeOptions {
+        rules,
+        replayer: Some(replayer),
+    };
+    serve_with_options(config, flows, extra_routes, shutdown, options).await
+}
+
+/// The single implementation behind [`serve`] and its variants.
+pub async fn serve_with_options(
+    config: UiConfig,
+    flows: FlowSender,
+    extra_routes: Router,
+    shutdown: CancellationToken,
+    options: ServeOptions,
+) -> Result<()> {
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("binding the web UI to {}", config.listen))?;
@@ -74,7 +109,7 @@ pub async fn serve_with_replayer(
         listen: listener.local_addr()?,
         ..config
     };
-    let app = build_with_replayer(&config, &flows, extra_routes, &shutdown, rules, replayer)?;
+    let app = build_with_options(&config, &flows, extra_routes, &shutdown, options)?;
     tracing::info!("web UI listening on http://{}", config.listen);
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { shutdown.cancelled().await })
@@ -90,7 +125,13 @@ fn build(
     extra_routes: Router,
     shutdown: &CancellationToken,
 ) -> Result<Router> {
-    build_with_rules(config, flows, extra_routes, shutdown, None)
+    build_with_options(
+        config,
+        flows,
+        extra_routes,
+        shutdown,
+        ServeOptions::default(),
+    )
 }
 
 #[cfg(test)]
@@ -101,10 +142,14 @@ fn build_with_rules(
     shutdown: &CancellationToken,
     rules: Option<Arc<RuleEngine>>,
 ) -> Result<Router> {
-    let replayer = Replayer::new(&[], DEFAULT_MAX_BODY_BYTES)?;
-    build_with_replayer(config, flows, extra_routes, shutdown, rules, replayer)
+    let options = ServeOptions {
+        rules,
+        ..ServeOptions::default()
+    };
+    build_with_options(config, flows, extra_routes, shutdown, options)
 }
 
+#[cfg(test)]
 fn build_with_replayer(
     config: &UiConfig,
     flows: &FlowSender,
@@ -113,6 +158,25 @@ fn build_with_replayer(
     rules: Option<Arc<RuleEngine>>,
     replayer: Replayer,
 ) -> Result<Router> {
+    let options = ServeOptions {
+        rules,
+        replayer: Some(replayer),
+    };
+    build_with_options(config, flows, extra_routes, shutdown, options)
+}
+
+fn build_with_options(
+    config: &UiConfig,
+    flows: &FlowSender,
+    extra_routes: Router,
+    shutdown: &CancellationToken,
+    options: ServeOptions,
+) -> Result<Router> {
+    let ServeOptions { rules, replayer } = options;
+    let replayer = match replayer {
+        Some(replayer) => replayer,
+        None => Replayer::new(&[], DEFAULT_MAX_BODY_BYTES)?,
+    };
     let token = config.token.as_deref().filter(|t| !t.is_empty());
     let protect = !config.listen.ip().is_loopback();
     if protect && token.is_none() {

@@ -97,21 +97,25 @@ pub async fn run_session(
         "sieve running",
     );
     let result = tokio::try_join!(
-        proxy::run_with_rules_and_scripts(
+        proxy::run_with_options(
             ctx.config.proxy.clone(),
             ca,
             flows.clone(),
             shutdown.clone(),
-            Some(rules.clone()),
-            Some(scripts),
+            proxy::RunOptions {
+                rules: Some(rules.clone()),
+                scripts: Some(scripts),
+            },
         ),
-        sieve_ui::serve_with_replayer(
+        sieve_ui::serve_with_options(
             ctx.config.ui.clone(),
             flows,
             setup_routes,
             shutdown.clone(),
-            Some(rules),
-            replayer,
+            sieve_ui::ServeOptions {
+                rules: Some(rules),
+                replayer: Some(replayer),
+            },
         ),
     );
     shutdown.cancel();

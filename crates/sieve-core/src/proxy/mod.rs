@@ -61,6 +61,16 @@ pub(crate) type BoxError = Box<dyn StdError + Send + Sync>;
 type ProxyBody = UnsyncBoxBody<Bytes, BoxError>;
 type UpstreamClient = Client<HttpsConnector<HttpConnector>, ProxyBody>;
 
+/// What [`run_with_options`] applies on top of the plain proxy.
+#[derive(Default)]
+pub struct RunOptions {
+    /// Rewrites, mocks and breakpoints for intercepted requests.
+    pub rules: Option<Arc<RuleEngine>>,
+    /// Rhai plugins (phase 5e), run on requests that no declarative rule
+    /// already answered.
+    pub scripts: Option<Arc<ScriptEngine>>,
+}
+
 /// Serves the proxy on `config.listen` until `shutdown` is cancelled,
 /// publishing every exchange on `flows`.
 pub async fn run(
@@ -69,7 +79,7 @@ pub async fn run(
     flows: FlowSender,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    run_with_rules(config, ca, flows, shutdown, None).await
+    run_with_options(config, ca, flows, shutdown, RunOptions::default()).await
 }
 
 /// Like [`run`], applying `rules` to the requests that pass through.
@@ -80,17 +90,11 @@ pub async fn run_with_rules(
     shutdown: CancellationToken,
     rules: Option<Arc<RuleEngine>>,
 ) -> Result<()> {
-    let listener = TcpListener::bind(config.listen)
-        .await
-        .with_context(|| format!("binding the proxy to {}", config.listen))?;
-    let mut proxy = Proxy::new(config, ca, flows);
-    proxy.rules = rules;
-    for path in proxy.config.upstream_ca_files.clone() {
-        for cert in load_pem_certs(&path)? {
-            proxy = proxy.trust_upstream_root(cert.to_vec());
-        }
-    }
-    proxy.serve(listener, shutdown).await
+    let options = RunOptions {
+        rules,
+        ..RunOptions::default()
+    };
+    run_with_options(config, ca, flows, shutdown, options).await
 }
 
 /// Like [`run_with_rules`], also running `scripts` (rhai plugins, phase 5e)
@@ -103,12 +107,25 @@ pub async fn run_with_rules_and_scripts(
     rules: Option<Arc<RuleEngine>>,
     scripts: Option<Arc<ScriptEngine>>,
 ) -> Result<()> {
+    let options = RunOptions { rules, scripts };
+    run_with_options(config, ca, flows, shutdown, options).await
+}
+
+/// The single implementation behind [`run`] and its variants: binds
+/// `config.listen`, trusts the configured upstream CA files, and serves.
+pub async fn run_with_options(
+    config: ProxyConfig,
+    ca: Arc<CertAuthority>,
+    flows: FlowSender,
+    shutdown: CancellationToken,
+    options: RunOptions,
+) -> Result<()> {
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("binding the proxy to {}", config.listen))?;
     let mut proxy = Proxy::new(config, ca, flows);
-    proxy.rules = rules;
-    proxy.scripts = scripts;
+    proxy.rules = options.rules;
+    proxy.scripts = options.scripts;
     for path in proxy.config.upstream_ca_files.clone() {
         for cert in load_pem_certs(&path)? {
             proxy = proxy.trust_upstream_root(cert.to_vec());
