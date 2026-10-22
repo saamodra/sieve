@@ -5,7 +5,7 @@ use std::{
     io::Write as _,
     net::IpAddr,
     num::NonZeroUsize,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -71,7 +71,11 @@ pub struct CertAuthority {
 
 impl CertAuthority {
     /// Loads `ca.pem`/`ca.key` from `paths`, generating them on first use.
+    ///
+    /// Holds an advisory lock while it checks and writes, so processes that
+    /// start together against an empty config dir all end up with one CA.
     pub fn load_or_create(paths: &Paths) -> Result<Self> {
+        let _lock = CaLock::acquire(paths)?;
         let (cert, key) = (paths.ca_cert(), paths.ca_key());
         match (cert.exists(), key.exists()) {
             (true, true) => Self::load(&cert, &key),
@@ -91,6 +95,7 @@ impl CertAuthority {
 
     /// Replaces the CA on disk with a freshly generated one.
     pub fn regenerate(paths: &Paths) -> Result<Self> {
+        let _lock = CaLock::acquire(paths)?;
         let ca = Self::generate()?;
         ca.save(paths)?;
         Ok(ca)
@@ -299,6 +304,28 @@ impl CertAuthority {
     }
 }
 
+/// An exclusive advisory lock on `ca.lock`, released when dropped (or when the
+/// process exits, so a crash never leaves it held).
+struct CaLock {
+    _file: fs::File,
+}
+
+impl CaLock {
+    fn acquire(paths: &Paths) -> Result<Self> {
+        paths.ensure()?;
+        let path = paths.config_dir.join("ca.lock");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        file.lock()
+            .with_context(|| format!("locking {}", path.display()))?;
+        Ok(Self { _file: file })
+    }
+}
+
 fn subject_hash_old(subject_der: &[u8]) -> String {
     let digest = Md5::digest(subject_der);
     let hash = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
@@ -324,11 +351,21 @@ fn random_id() -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// A temp path next to `path` that no other write shares: it carries the
+/// target's file name, the pid and a random suffix.
+fn temp_path(path: &Path) -> Result<PathBuf> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    Ok(path.with_file_name(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        random_id()?
+    )))
+}
+
 /// Writes through a temp file and a rename, so a crash never leaves a
 /// half-written key behind, and the key is never readable by others.
 fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    let _ = fs::remove_file(&tmp);
+    let tmp = temp_path(path)?;
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -341,7 +378,11 @@ fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
     file.write_all(contents)
         .and_then(|()| file.sync_all())
         .with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+    fs::rename(&tmp, path)
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(unix)]
@@ -427,6 +468,51 @@ mod tests {
         let new = CertAuthority::regenerate(&Paths::at(dir.path())).unwrap();
         assert_ne!(first.cert_pem(), new.cert_pem());
         assert_eq!(ca_in(&dir).cert_pem(), new.cert_pem());
+    }
+
+    #[test]
+    fn concurrent_first_runs_share_one_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::at(dir.path());
+        let threads = 16;
+        let barrier = std::sync::Barrier::new(threads);
+        let cas: Vec<CertAuthority> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        CertAuthority::load_or_create(&paths).unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        for ca in &cas {
+            assert_eq!(ca.cert_der(), cas[0].cert_der());
+        }
+        let saved = CertAuthority::load(&paths.ca_cert(), &paths.ca_key()).unwrap();
+        assert_eq!(saved.cert_der(), cas[0].cert_der());
+        let stray: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(stray.is_empty(), "leftover temp files: {stray:?}");
+    }
+
+    #[test]
+    fn temp_paths_are_unique_per_write_and_per_target() {
+        let dir = Path::new("/ca");
+        let (key, cert) = (dir.join("ca.key"), dir.join("ca.pem"));
+        let paths = [
+            temp_path(&key).unwrap(),
+            temp_path(&key).unwrap(),
+            temp_path(&cert).unwrap(),
+        ];
+        assert_ne!(paths[0], paths[1]);
+        assert_ne!(paths[0], paths[2]);
+        assert!(paths.iter().all(|p| p.parent() == Some(dir)));
     }
 
     #[test]
