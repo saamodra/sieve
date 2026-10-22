@@ -40,6 +40,12 @@
 //! client gets it. A script that fails is logged and skipped; changes made by
 //! the scripts before it still apply.
 //!
+//! The scripts directory is watched ([`ScriptEngine::watch`]): adding, editing
+//! or removing a `*.rhai` file swaps in a freshly compiled set without a
+//! restart. Requests already running keep the set they started with. If any
+//! script in the directory fails to compile, the whole previous set stays in
+//! force and the error is logged, so a typo mid-edit never switches scripts off.
+//!
 //! Hooks see whole bodies, so the proxy reads a body into memory before
 //! running them, but never more than `max_body_bytes` of it. A larger body,
 //! one that does not decode within that limit, or one with trailers, is
@@ -48,11 +54,16 @@
 //! does not run for that response. `text/event-stream` responses are never
 //! buffered, so server-sent events never reach `on_response`.
 
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, RwLock},
+};
 
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rhai::{AST, Array, Dynamic, Engine, Map, Scope};
+use tracing::{debug, info, warn};
 
 use crate::flow::{Request, Response};
 
@@ -65,6 +76,7 @@ pub enum RequestOutcome {
     Respond(Response),
 }
 
+#[derive(Clone)]
 struct Script {
     name: String,
     ast: AST,
@@ -72,10 +84,12 @@ struct Script {
     on_response: bool,
 }
 
-/// A set of loaded scripts, run in load order.
+/// A set of loaded scripts, run in load order. The set can be swapped while
+/// requests are running; see [`ScriptEngine::reload`].
 pub struct ScriptEngine {
     engine: Engine,
-    scripts: Vec<Script>,
+    scripts: RwLock<Arc<Vec<Script>>>,
+    dir: Option<PathBuf>,
 }
 
 impl Default for ScriptEngine {
@@ -103,39 +117,67 @@ impl ScriptEngine {
         engine.register_fn("remove_header", |h: &mut Array, name: &str| remove(h, name));
         Self {
             engine,
-            scripts: Vec::new(),
+            scripts: RwLock::new(Arc::new(Vec::new())),
+            dir: None,
         }
     }
 
-    /// Compiles `source` and adds it under `name` (used in error messages).
-    pub fn load_source(&mut self, name: &str, source: &str) -> Result<()> {
+    /// An engine backed by the scripts directory `dir`, for [`reload`] and
+    /// [`watch`]. The directory is not read until the first reload.
+    ///
+    /// [`reload`]: ScriptEngine::reload
+    /// [`watch`]: ScriptEngine::watch
+    pub fn for_dir(dir: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            dir: Some(dir),
+            ..Self::new()
+        })
+    }
+
+    fn snapshot(&self) -> Arc<Vec<Script>> {
+        self.scripts.read().expect("scripts poisoned").clone()
+    }
+
+    fn compile(&self, name: &str, source: &str) -> Result<Script> {
         let ast = self
             .engine
             .compile(source)
             .map_err(|e| anyhow!("compiling script {name}: {e}"))?;
         let has = |f: &str| ast.iter_functions().any(|m| m.name == f);
-        self.scripts.push(Script {
+        Ok(Script {
             name: name.to_string(),
             on_request: has("on_request"),
             on_response: has("on_response"),
             ast,
-        });
+        })
+    }
+
+    fn compile_file(&self, path: &Path) -> Result<Script> {
+        let source = std::fs::read_to_string(path)
+            .with_context(|| format!("reading script {}", path.display()))?;
+        self.compile(&path.display().to_string(), &source)
+    }
+
+    /// Compiles `source` and adds it under `name` (used in error messages).
+    pub fn load_source(&self, name: &str, source: &str) -> Result<()> {
+        let script = self.compile(name, source)?;
+        Arc::make_mut(&mut self.scripts.write().expect("scripts poisoned")).push(script);
         Ok(())
     }
 
     /// Loads one `.rhai` file.
-    pub fn load_file(&mut self, path: &Path) -> Result<()> {
-        let source = std::fs::read_to_string(path)
-            .with_context(|| format!("reading script {}", path.display()))?;
-        self.load_source(&path.display().to_string(), &source)
+    pub fn load_file(&self, path: &Path) -> Result<()> {
+        let script = self.compile_file(path)?;
+        Arc::make_mut(&mut self.scripts.write().expect("scripts poisoned")).push(script);
+        Ok(())
     }
 
-    /// Loads every `*.rhai` file in `dir`, sorted by file name. A missing
-    /// directory loads nothing. Returns the number of scripts loaded.
-    pub fn load_dir(&mut self, dir: &Path) -> Result<usize> {
+    /// Compiles every `*.rhai` file in `dir`, sorted by file name. A missing
+    /// directory means no scripts.
+    fn compile_dir(&self, dir: &Path) -> Result<Vec<Script>> {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
         };
         let mut paths: Vec<_> = entries
@@ -143,26 +185,80 @@ impl ScriptEngine {
             .filter(|p| p.extension().is_some_and(|x| x == "rhai"))
             .collect();
         paths.sort();
-        for p in &paths {
-            self.load_file(p)?;
-        }
-        Ok(paths.len())
+        paths.iter().map(|p| self.compile_file(p)).collect()
+    }
+
+    /// Adds every `*.rhai` file in `dir`, sorted by file name. A missing
+    /// directory loads nothing. Returns the number of scripts loaded; if one
+    /// fails to compile, none of the directory's scripts are added.
+    pub fn load_dir(&self, dir: &Path) -> Result<usize> {
+        let loaded = self.compile_dir(dir)?;
+        let count = loaded.len();
+        Arc::make_mut(&mut self.scripts.write().expect("scripts poisoned")).extend(loaded);
+        Ok(count)
+    }
+
+    /// Replaces the loaded scripts with the `*.rhai` files in the directory
+    /// given to [`ScriptEngine::for_dir`]. A missing directory means no
+    /// scripts; a script that fails to compile is an error and the previous
+    /// scripts stay in force. Returns the number of scripts now loaded.
+    pub fn reload(&self) -> Result<usize> {
+        let Some(dir) = &self.dir else {
+            return Ok(self.snapshot().len());
+        };
+        let scripts = self.compile_dir(dir)?;
+        let count = scripts.len();
+        *self.scripts.write().expect("scripts poisoned") = Arc::new(scripts);
+        debug!("loaded {count} scripts from {}", dir.display());
+        Ok(count)
+    }
+
+    /// Reloads the scripts directory whenever a `*.rhai` file in it changes,
+    /// until the returned watcher is dropped. The directory is created if it
+    /// does not exist yet. A set that fails to compile is reported and ignored.
+    pub fn watch(self: &Arc<Self>) -> Result<RecommendedWatcher> {
+        let dir = self
+            .dir
+            .clone()
+            .context("this script engine has no directory to watch")?;
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let engine = self.clone();
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                let Ok(event) = event else { return };
+                if event.kind.is_access() {
+                    return;
+                }
+                if !event
+                    .paths
+                    .iter()
+                    .any(|p| p.extension().is_some_and(|x| x == "rhai"))
+                {
+                    return;
+                }
+                match engine.reload() {
+                    Ok(n) => info!(n, "scripts reloaded"),
+                    Err(e) => warn!("keeping the previous scripts: {e:#}"),
+                }
+            })?;
+        watcher.watch(&dir, RecursiveMode::NonRecursive)?;
+        Ok(watcher)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.scripts.is_empty()
+        self.snapshot().is_empty()
     }
 
     /// Whether any loaded script defines `on_response`, so a caller can skip
     /// buffering a response body when nothing would use it.
     pub fn has_on_response(&self) -> bool {
-        self.scripts.iter().any(|s| s.on_response)
+        self.snapshot().iter().any(|s| s.on_response)
     }
 
     /// Runs every `on_request` hook against `req`, rewriting it in place.
     /// Stops at the first script that asks to respond directly.
     pub fn on_request(&self, req: &mut Request) -> Result<RequestOutcome> {
-        for s in self.scripts.iter().filter(|s| s.on_request) {
+        for s in self.snapshot().iter().filter(|s| s.on_request) {
             let out: Dynamic = self
                 .engine
                 .call_fn(&mut Scope::new(), &s.ast, "on_request", (request_map(req),))
@@ -180,7 +276,7 @@ impl ScriptEngine {
 
     /// Runs every `on_response` hook against `res`, rewriting it in place.
     pub fn on_response(&self, req: &Request, res: &mut Response) -> Result<()> {
-        for s in self.scripts.iter().filter(|s| s.on_response) {
+        for s in self.snapshot().iter().filter(|s| s.on_response) {
             let out: Dynamic = self
                 .engine
                 .call_fn(
@@ -340,7 +436,7 @@ mod tests {
 
     #[test]
     fn rewrites_request_headers_and_url() {
-        let mut s = ScriptEngine::new();
+        let s = ScriptEngine::new();
         s.load_source(
             "t",
             r#"fn on_request(req) {
@@ -362,7 +458,7 @@ mod tests {
 
     #[test]
     fn respond_short_circuits_and_later_scripts_do_not_run() {
-        let mut s = ScriptEngine::new();
+        let s = ScriptEngine::new();
         s.load_source(
             "a",
             r#"fn on_request(req) {
@@ -386,7 +482,7 @@ mod tests {
 
     #[test]
     fn rewrites_response_body_and_status() {
-        let mut s = ScriptEngine::new();
+        let s = ScriptEngine::new();
         s.load_source(
             "t",
             r#"fn on_response(req, res) {
@@ -405,7 +501,7 @@ mod tests {
 
     #[test]
     fn unit_return_and_untouched_body_leave_the_message_alone() {
-        let mut s = ScriptEngine::new();
+        let s = ScriptEngine::new();
         s.load_source("t", "fn on_response(req, res) { }").unwrap();
         let mut res = response("\u{1}binary\u{ff}");
         res.body.raw = Bytes::from_static(&[1, 0xff]);
@@ -415,7 +511,7 @@ mod tests {
 
     #[test]
     fn errors_name_the_script_and_loops_are_bounded() {
-        let mut s = ScriptEngine::new();
+        let s = ScriptEngine::new();
         assert!(s.load_source("bad", "fn on_request(").is_err());
         s.load_source("loop", "fn on_request(req) { loop {} }")
             .unwrap();
@@ -437,11 +533,110 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("notes.txt"), "ignored").unwrap();
-        let mut s = ScriptEngine::new();
+        let s = ScriptEngine::new();
         assert_eq!(s.load_dir(dir.path()).unwrap(), 2);
         assert_eq!(s.load_dir(&dir.path().join("missing")).unwrap(), 0);
         let mut req = request();
         s.on_request(&mut req).unwrap();
         assert_eq!(req.method, "P2");
+    }
+
+    fn method_script(method: &str) -> String {
+        format!(r#"fn on_request(req) {{ req.method = "{method}"; req }}"#)
+    }
+
+    fn method_after(s: &ScriptEngine) -> String {
+        let mut req = request();
+        s.on_request(&mut req).unwrap();
+        req.method
+    }
+
+    #[test]
+    fn reload_picks_up_new_and_changed_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = ScriptEngine::for_dir(dir.path().to_path_buf());
+        assert_eq!(s.reload().unwrap(), 0);
+        assert!(s.is_empty());
+
+        std::fs::write(dir.path().join("a.rhai"), method_script("ONE")).unwrap();
+        assert_eq!(s.reload().unwrap(), 1);
+        assert_eq!(method_after(&s), "ONE");
+
+        std::fs::write(dir.path().join("a.rhai"), method_script("TWO")).unwrap();
+        std::fs::write(
+            dir.path().join("b.rhai"),
+            "fn on_response(req, res) { res }",
+        )
+        .unwrap();
+        assert_eq!(s.reload().unwrap(), 2);
+        assert_eq!(method_after(&s), "TWO");
+        assert!(s.has_on_response());
+
+        std::fs::remove_file(dir.path().join("a.rhai")).unwrap();
+        assert_eq!(s.reload().unwrap(), 1);
+        assert_eq!(method_after(&s), "GET");
+    }
+
+    #[test]
+    fn a_broken_script_on_reload_keeps_the_previous_set() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rhai"), method_script("OLD")).unwrap();
+        let s = ScriptEngine::for_dir(dir.path().to_path_buf());
+        s.reload().unwrap();
+
+        std::fs::write(dir.path().join("a.rhai"), method_script("NEW")).unwrap();
+        std::fs::write(dir.path().join("b.rhai"), "fn on_request(").unwrap();
+        let err = s.reload().unwrap_err().to_string();
+        assert!(err.contains("b.rhai"), "{err}");
+        assert_eq!(method_after(&s), "OLD");
+
+        std::fs::remove_file(dir.path().join("b.rhai")).unwrap();
+        s.reload().unwrap();
+        assert_eq!(method_after(&s), "NEW");
+    }
+
+    #[test]
+    fn a_running_request_keeps_the_set_it_started_with() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rhai"), method_script("OLD")).unwrap();
+        let s = ScriptEngine::for_dir(dir.path().to_path_buf());
+        s.reload().unwrap();
+        let before = s.snapshot();
+        std::fs::remove_file(dir.path().join("a.rhai")).unwrap();
+        s.reload().unwrap();
+        assert!(s.is_empty());
+        assert_eq!(before.len(), 1);
+    }
+
+    #[test]
+    fn the_watcher_reloads_after_a_file_write() {
+        let dir = tempfile::tempdir().unwrap();
+        // The directory does not exist yet: watching creates it.
+        let scripts_dir = dir.path().join("scripts");
+        let s = ScriptEngine::for_dir(scripts_dir.clone());
+        let _watcher = s.watch().unwrap();
+        assert!(s.is_empty());
+
+        std::fs::write(scripts_dir.join("a.rhai"), method_script("HOT")).unwrap();
+        wait_for(|| method_after(&s) == "HOT");
+
+        std::fs::write(scripts_dir.join("a.rhai"), method_script("HOTTER")).unwrap();
+        wait_for(|| method_after(&s) == "HOTTER");
+
+        // A broken save leaves the working script running.
+        std::fs::write(scripts_dir.join("a.rhai"), "fn on_request(").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(method_after(&s), "HOTTER");
+    }
+
+    fn wait_for(mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the watcher did not reload in time"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }

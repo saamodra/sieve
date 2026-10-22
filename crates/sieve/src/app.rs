@@ -73,13 +73,21 @@ pub async fn run_session(
         }
     };
 
-    let mut scripts = ScriptEngine::new();
-    match scripts.load_dir(&ctx.paths.scripts_dir()) {
+    let scripts = ScriptEngine::for_dir(ctx.paths.scripts_dir());
+    match scripts.reload() {
         Ok(0) => {}
         Ok(n) => info!(n, "loaded scripting plugins"),
         Err(e) => warn!("ignoring the scripts directory: {e:#}"),
     }
-    let scripts = Arc::new(scripts);
+    // Held for the session, like the rules watcher. This also creates the
+    // scripts directory, so scripts added to a fresh install load live.
+    let _scripts_watcher = match scripts.watch() {
+        Ok(watcher) => Some(watcher),
+        Err(e) => {
+            warn!("not watching the scripts directory for changes: {e:#}");
+            None
+        }
+    };
     let replayer = proxy::replay::Replayer::from_config(&ctx.config.proxy)
         .context("preparing the replay client")?;
 
