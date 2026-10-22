@@ -780,3 +780,144 @@ async fn map_remote_and_header_rules_apply_to_the_websocket_handshake() {
     assert_eq!(header(&flow.request.headers, "x-via"), Some("sieve"));
     assert_eq!(flow.response.as_ref().unwrap().status, 101);
 }
+
+/// An address of this machine other than loopback, found by asking the OS
+/// which interface routes to a documentation address (nothing is sent).
+fn lan_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:9").ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
+/// Sends `request` to the proxy from `from`, so the proxy sees a client that
+/// is not on loopback, and returns the response: its head, then as many body
+/// bytes as its `content-length` says (the connection may stay open).
+async fn raw_request_from(from: std::net::IpAddr, proxy: SocketAddr, request: &str) -> String {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind(SocketAddr::new(from, 0)).unwrap();
+    let mut tcp = socket.connect(proxy).await.unwrap();
+    tcp.write_all(request.as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut buf = [0; 1024];
+        loop {
+            let text = String::from_utf8_lossy(&answer).to_ascii_lowercase();
+            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                let wanted = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length: "))
+                    .map_or(0, |n| n.trim().parse().unwrap());
+                if body.len() >= wanted {
+                    return;
+                }
+            }
+            match tcp.read(&mut buf).await.unwrap() {
+                0 => return,
+                n => answer.extend_from_slice(&buf[..n]),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the proxy");
+    String::from_utf8_lossy(&answer).into_owned()
+}
+
+async fn assert_refused_flow(sieve: &mut Sieve, url: &str) {
+    let flow = completed_flow(&mut sieve.flows, |f| f.request.url == url).await;
+    assert_eq!(flow.response.as_ref().unwrap().status, 403);
+    let error = flow.error.as_deref().unwrap();
+    assert!(error.contains("loopback"), "{error}");
+}
+
+#[tokio::test]
+async fn lan_clients_cannot_reach_loopback_targets() {
+    let Some(lan) = lan_ip() else {
+        eprintln!("skipped: no non-loopback address on this machine");
+        return;
+    };
+    // Counts the connections that reach the upstream.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = listener.local_addr().unwrap();
+    let (reached, mut reached_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((tcp, _)) = listener.accept().await {
+            let _ = reached.send(tcp);
+        }
+    });
+    let mut sieve = spawn_sieve(ProxyConfig::default(), None).await;
+
+    let url = format!("http://{upstream}/hello");
+    let request = format!("GET {url} HTTP/1.1\r\nHost: {upstream}\r\nConnection: close\r\n\r\n");
+    let answer = raw_request_from(lan, sieve.addr, &request).await;
+    assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
+    assert!(answer.contains("sieve: "), "{answer}");
+    assert_refused_flow(&mut sieve, &url).await;
+
+    let localhost = format!("http://localhost:{}/hello", upstream.port());
+    let request =
+        format!("GET {localhost} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    let answer = raw_request_from(lan, sieve.addr, &request).await;
+    assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
+
+    let request = format!("CONNECT {upstream} HTTP/1.1\r\nHost: {upstream}\r\n\r\n");
+    let answer = raw_request_from(lan, sieve.addr, &request).await;
+    assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
+    assert_refused_flow(&mut sieve, &upstream.to_string()).await;
+
+    let ws = format!("http://{upstream}/ws");
+    let request = format!(
+        "GET {ws} HTTP/1.1\r\nHost: {upstream}\r\nConnection: Upgrade\r\n\
+         Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    );
+    let answer = raw_request_from(lan, sieve.addr, &request).await;
+    assert!(answer.starts_with("HTTP/1.1 403"), "{answer}");
+    assert_refused_flow(&mut sieve, &format!("ws://{upstream}/ws")).await;
+
+    let reached = tokio::time::timeout(Duration::from_millis(300), reached_rx.recv()).await;
+    assert!(reached.is_err(), "a refused request reached the upstream");
+}
+
+#[tokio::test]
+async fn lan_clients_may_reach_loopback_with_the_opt_in() {
+    let Some(lan) = lan_ip() else {
+        eprintln!("skipped: no non-loopback address on this machine");
+        return;
+    };
+    let upstream = spawn_http_upstream().await;
+    let config = ProxyConfig {
+        allow_lan_to_loopback: true,
+        ..Default::default()
+    };
+    let sieve = spawn_sieve(config, None).await;
+
+    let url = format!("http://{upstream}/hello");
+    let request = format!("GET {url} HTTP/1.1\r\nHost: {upstream}\r\nConnection: close\r\n\r\n");
+    let answer = raw_request_from(lan, sieve.addr, &request).await;
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    assert!(answer.ends_with(HELLO), "{answer}");
+}
+
+#[tokio::test]
+async fn map_remote_to_loopback_works_for_lan_clients() {
+    let Some(lan) = lan_ip() else {
+        eprintln!("skipped: no non-loopback address on this machine");
+        return;
+    };
+    let upstream = spawn_http_upstream().await;
+    let sieve = spawn_sieve_with_rules(vec![host_rule(
+        "mapped.invalid",
+        sieve_core::rules::Action {
+            map_remote: Some(upstream.to_string()),
+            ..Default::default()
+        },
+    )])
+    .await;
+
+    let request = "GET http://mapped.invalid/hello HTTP/1.1\r\nHost: mapped.invalid\r\n\
+                   Connection: close\r\n\r\n";
+    let answer = raw_request_from(lan, sieve.addr, request).await;
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    assert!(answer.ends_with(HELLO), "{answer}");
+}
