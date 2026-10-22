@@ -15,7 +15,10 @@ pub type FlowId = u64;
 pub type FlowSender = broadcast::Sender<Arc<Flow>>;
 pub type FlowReceiver = broadcast::Receiver<Arc<Flow>>;
 
-const CHANNEL_CAPACITY: usize = 4096;
+/// Every flow is published at least twice (request seen, then finished), so a
+/// burst of a few thousand parallel requests alone needs thousands of slots. A
+/// slow subscriber that falls this far behind loses messages for good.
+const CHANNEL_CAPACITY: usize = 32 * 1024;
 
 pub fn channel() -> FlowSender {
     broadcast::channel(CHANNEL_CAPACITY).0

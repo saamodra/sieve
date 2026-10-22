@@ -200,16 +200,27 @@ async fn ingest(
                 Ok(flow) => flow,
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!("web UI fell behind the proxy and dropped {n} flow updates");
+                    // The skipped messages may include a flow's final version,
+                    // which would leave it pending forever. Make that visible,
+                    // then have clients re-read the store.
+                    let marked = store.mark_lost_pending();
+                    if !marked.is_empty() {
+                        tracing::warn!("{} pending flows marked as lost", marked.len());
+                    }
                     let _ = events.send(WsEvent::Resync);
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
             },
         };
-        let summary = Box::new(FlowSummary::from(flow.as_ref()));
+        // Keep the per-message work minimal: the channel is bounded, so every
+        // microsecond spent here is headroom against losing a final update.
+        let summary =
+            (events.receiver_count() > 0).then(|| Box::new(FlowSummary::from(flow.as_ref())));
         store.upsert(flow);
-        // No WebSocket subscribers is fine.
-        let _ = events.send(WsEvent::Flow { flow: summary });
+        if let Some(flow) = summary {
+            let _ = events.send(WsEvent::Flow { flow });
+        }
     }
 }
 
@@ -217,3 +228,98 @@ async fn ingest(
 mod rules_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod ingest_tests {
+    use std::time::Duration;
+
+    use sieve_core::flow;
+
+    use super::*;
+    use crate::store::{LOST_UPDATE_ERROR, tests::flow as test_flow};
+
+    /// Waits until `done` holds, so the tests do not depend on how fast the
+    /// ingest task is scheduled on a loaded machine.
+    async fn wait_for(mut done: impl FnMut() -> bool) {
+        for _ in 0..1000 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("ingest did not catch up within 10s");
+    }
+
+    fn pending_ids(store: &FlowStore) -> Vec<u64> {
+        let (_, page) = store.list(&Default::default(), 0, usize::MAX);
+        page.iter()
+            .filter(|s| s.status.is_none() && s.error.is_none())
+            .map(|s| s.id)
+            .collect()
+    }
+
+    /// Spawns `ingest` on a fresh store; the task cannot run until the test
+    /// yields, so everything sent before then is a burst.
+    fn start(tx: &FlowSender, shutdown: &CancellationToken) -> Arc<FlowStore> {
+        let store = Arc::new(FlowStore::new(DEFAULT_MAX_FLOWS));
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        tokio::spawn(ingest(
+            tx.subscribe(),
+            store.clone(),
+            events,
+            shutdown.clone(),
+        ));
+        store
+    }
+
+    #[tokio::test]
+    async fn burst_larger_than_old_capacity_keeps_every_final_version() {
+        // Two messages per flow, comfortably more than the old 4096 slots.
+        const FLOWS: u64 = 5_000;
+        let tx = flow::channel();
+        let shutdown = CancellationToken::new();
+        let store = start(&tx, &shutdown);
+        for id in 1..=FLOWS {
+            tx.send(test_flow(id, None)).unwrap();
+            tx.send(test_flow(id, Some(200))).unwrap();
+        }
+        wait_for(|| store.get(FLOWS).is_some_and(|f| f.response.is_some())).await;
+        let (total, _) = store.list(&Default::default(), 0, 0);
+        assert_eq!(total, FLOWS as usize);
+        assert!(pending_ids(&store).is_empty());
+        assert!((1..=FLOWS).all(|id| store.get(id).unwrap().response.is_some()));
+        assert!((1..=FLOWS).all(|id| store.get(id).unwrap().error.is_none()));
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn lagging_feed_does_not_leave_flows_pending_forever() {
+        // A channel small enough to overflow, standing in for a burst bigger
+        // than any capacity.
+        let (tx, _) = broadcast::channel(4);
+        let shutdown = CancellationToken::new();
+        let store = start(&tx, &shutdown);
+        for id in 1..=4 {
+            tx.send(test_flow(id, None)).unwrap();
+        }
+        wait_for(|| pending_ids(&store).len() == 4).await;
+        assert_eq!(pending_ids(&store), [1, 2, 3, 4]);
+
+        // The final versions are overwritten before ingest sees them.
+        for id in 1..=4 {
+            tx.send(test_flow(id, Some(200))).unwrap();
+        }
+        for id in 100..104 {
+            tx.send(test_flow(id, Some(200))).unwrap();
+        }
+        wait_for(|| store.get(103).is_some()).await;
+
+        assert!(pending_ids(&store).is_empty());
+        for id in 1..=4 {
+            let flow = store.get(id).unwrap();
+            assert_eq!(flow.error.as_deref(), Some(LOST_UPDATE_ERROR));
+        }
+        assert!((100..104).all(|id| store.get(id).unwrap().error.is_none()));
+        shutdown.cancel();
+    }
+}

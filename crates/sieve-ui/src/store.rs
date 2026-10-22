@@ -7,7 +7,7 @@ use std::{
 
 use sieve_core::{Flow, flow::FlowId};
 
-use crate::model::FlowSummary;
+use crate::{api::SYNTHETIC_ID_BASE, model::FlowSummary};
 
 /// Default cap on the number of retained flows.
 pub const DEFAULT_MAX_FLOWS: usize = 10_000;
@@ -89,7 +89,20 @@ fn status_matches(pattern: &str, s: &FlowSummary) -> bool {
 struct Inner {
     order: VecDeque<FlowId>,
     flows: HashMap<FlowId, Arc<Flow>>,
+    /// Highest id evicted so far, per id range (see [`range_of`]). A flow with
+    /// an id at or below it that is not retained was evicted, and an update
+    /// for it is dropped instead of re-inserting it as the newest flow.
+    evicted_up_to: [Option<FlowId>; 2],
 }
+
+/// Proxy flows and UI-created flows (replay, HAR import) are numbered by
+/// separate counters, so each range keeps its own eviction watermark.
+fn range_of(id: FlowId) -> usize {
+    usize::from(id >= SYNTHETIC_ID_BASE)
+}
+
+/// Marks a flow whose final update never reached the store.
+pub const LOST_UPDATE_ERROR: &str = "final update lost: the web UI fell behind the proxy";
 
 /// Flows keyed by id in arrival order. Once `max_flows` is reached the oldest
 /// flow is evicted for each new one.
@@ -105,6 +118,7 @@ impl FlowStore {
             inner: Mutex::new(Inner {
                 order: VecDeque::new(),
                 flows: HashMap::new(),
+                evicted_up_to: [None; 2],
             }),
         }
     }
@@ -114,17 +128,51 @@ impl FlowStore {
     }
 
     /// Inserts a new flow or replaces the one with the same id, keeping its
-    /// position in the arrival order.
+    /// position in the arrival order. An update for a flow that was already
+    /// evicted is dropped.
     pub fn upsert(&self, flow: Arc<Flow>) {
         let mut inner = self.lock();
-        if inner.flows.insert(flow.id, flow.clone()).is_none() {
-            inner.order.push_back(flow.id);
-            while inner.order.len() > self.max_flows {
-                if let Some(old) = inner.order.pop_front() {
-                    inner.flows.remove(&old);
-                }
+        let id = flow.id;
+        if let Some(slot) = inner.flows.get_mut(&id) {
+            *slot = flow;
+            return;
+        }
+        if inner.evicted_up_to[range_of(id)].is_some_and(|evicted| id <= evicted) {
+            return;
+        }
+        inner.flows.insert(id, flow);
+        inner.order.push_back(id);
+        while inner.order.len() > self.max_flows {
+            if let Some(old) = inner.order.pop_front() {
+                inner.flows.remove(&old);
+                let mark = &mut inner.evicted_up_to[range_of(old)];
+                *mark = Some(mark.map_or(old, |m| m.max(old)));
             }
         }
+    }
+
+    /// Gives every retained flow that still has neither a response nor an
+    /// error an error saying its final update was lost, and returns the
+    /// rewritten flows. Called after the feed dropped messages, since a lost
+    /// final version would otherwise leave the flow pending forever. A flow
+    /// that is genuinely still in flight is corrected by its real final
+    /// update, which replaces this one.
+    pub fn mark_lost_pending(&self) -> Vec<Arc<Flow>> {
+        let mut inner = self.lock();
+        let Inner { order, flows, .. } = &mut *inner;
+        let mut marked = Vec::new();
+        for id in order.iter() {
+            let Some(slot) = flows.get_mut(id) else {
+                continue;
+            };
+            if slot.response.is_none() && slot.error.is_none() {
+                let mut flow = Flow::clone(slot);
+                flow.error = Some(LOST_UPDATE_ERROR.to_string());
+                *slot = Arc::new(flow);
+                marked.push(slot.clone());
+            }
+        }
+        marked
     }
 
     pub fn get(&self, id: FlowId) -> Option<Arc<Flow>> {
@@ -135,6 +183,7 @@ impl FlowStore {
         let mut inner = self.lock();
         inner.order.clear();
         inner.flows.clear();
+        inner.evicted_up_to = [None; 2];
     }
 
     #[cfg(test)]
@@ -142,15 +191,23 @@ impl FlowStore {
         self.lock().order.len()
     }
 
-    /// Every flow matching `filter`, in arrival order.
-    pub fn matching(&self, filter: &FlowFilter) -> Vec<Arc<Flow>> {
+    /// All retained flows in arrival order. Readers filter this copy so the
+    /// lock is held only for cheap `Arc` clones and never blocks the ingest
+    /// task while summaries are built.
+    fn snapshot(&self) -> Vec<Arc<Flow>> {
         let inner = self.lock();
         inner
             .order
             .iter()
-            .map(|id| &inner.flows[id])
+            .map(|id| inner.flows[id].clone())
+            .collect()
+    }
+
+    /// Every flow matching `filter`, in arrival order.
+    pub fn matching(&self, filter: &FlowFilter) -> Vec<Arc<Flow>> {
+        self.snapshot()
+            .into_iter()
             .filter(|f| filter.matches(&FlowSummary::from(f.as_ref())))
-            .cloned()
             .collect()
     }
 
@@ -162,11 +219,10 @@ impl FlowStore {
         offset: usize,
         limit: usize,
     ) -> (usize, Vec<FlowSummary>) {
-        let inner = self.lock();
         let mut total = 0;
         let mut page = Vec::new();
-        for id in &inner.order {
-            let summary = FlowSummary::from(inner.flows[id].as_ref());
+        for flow in self.snapshot() {
+            let summary = FlowSummary::from(flow.as_ref());
             if !filter.matches(&summary) {
                 continue;
             }
@@ -176,5 +232,116 @@ impl FlowStore {
             total += 1;
         }
         (total, page)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use sieve_core::flow::{Body, FlowKind, Request, Response, Timing};
+    use time::OffsetDateTime;
+
+    use super::*;
+
+    /// A GET flow; with `status` it looks finished, without it pending.
+    pub(crate) fn flow(id: FlowId, status: Option<u16>) -> Arc<Flow> {
+        Arc::new(Flow {
+            id,
+            started_at: OffsetDateTime::UNIX_EPOCH,
+            client: None,
+            kind: FlowKind::Http,
+            request: Request {
+                method: "GET".into(),
+                url: format!("https://a.test/{id}"),
+                http_version: "HTTP/1.1".into(),
+                headers: Vec::new(),
+                body: Body::default(),
+            },
+            response: status.map(|status| Response {
+                status,
+                http_version: "HTTP/1.1".into(),
+                headers: Vec::new(),
+                body: Body::default(),
+            }),
+            error: None,
+            timing: Timing::default(),
+        })
+    }
+
+    fn ids(store: &FlowStore) -> Vec<FlowId> {
+        store
+            .list(&FlowFilter::default(), 0, usize::MAX)
+            .1
+            .iter()
+            .map(|s| s.id)
+            .collect()
+    }
+
+    #[test]
+    fn evicted_pending_flow_does_not_come_back() {
+        let store = FlowStore::new(3);
+        for id in 1..=4 {
+            store.upsert(flow(id, None));
+        }
+        assert_eq!(ids(&store), [2, 3, 4]);
+        // Flow 1 was evicted while pending; its final version must be dropped.
+        store.upsert(flow(1, Some(200)));
+        assert_eq!(ids(&store), [2, 3, 4]);
+        assert!(store.get(1).is_none());
+        // Retained flows still update in place.
+        store.upsert(flow(2, Some(200)));
+        assert_eq!(store.get(2).unwrap().response.as_ref().unwrap().status, 200);
+        assert_eq!(ids(&store), [2, 3, 4]);
+    }
+
+    #[test]
+    fn eviction_watermarks_are_per_id_range() {
+        let store = FlowStore::new(2);
+        let synthetic = SYNTHETIC_ID_BASE;
+        // Evict proxy flows only.
+        store.upsert(flow(10, None));
+        store.upsert(flow(11, None));
+        store.upsert(flow(12, None));
+        // A UI-created flow has a far higher id and is simply new.
+        store.upsert(flow(synthetic, Some(200)));
+        assert_eq!(ids(&store), [12, synthetic]);
+        // Evicting a synthetic flow must not block proxy flows with lower ids
+        // in the other range, and vice versa.
+        store.upsert(flow(synthetic + 1, Some(200)));
+        store.upsert(flow(synthetic + 2, Some(200)));
+        assert_eq!(ids(&store), [synthetic + 1, synthetic + 2]);
+        store.upsert(flow(synthetic, Some(404)));
+        assert_eq!(ids(&store), [synthetic + 1, synthetic + 2]);
+        store.upsert(flow(13, Some(200)));
+        assert!(store.get(13).is_some());
+        store.upsert(flow(11, Some(200)));
+        assert!(store.get(11).is_none());
+    }
+
+    #[test]
+    fn clear_forgets_evictions() {
+        let store = FlowStore::new(1);
+        store.upsert(flow(1, None));
+        store.upsert(flow(2, None));
+        store.clear();
+        store.upsert(flow(1, Some(200)));
+        assert_eq!(ids(&store), [1]);
+    }
+
+    #[test]
+    fn mark_lost_pending_only_touches_pending_flows() {
+        let store = FlowStore::new(10);
+        store.upsert(flow(1, None));
+        store.upsert(flow(2, Some(200)));
+        let marked = store.mark_lost_pending();
+        assert_eq!(marked.len(), 1);
+        assert_eq!(
+            store.get(1).unwrap().error.as_deref(),
+            Some(LOST_UPDATE_ERROR)
+        );
+        assert!(store.get(2).unwrap().error.is_none());
+        // The real final update still wins.
+        store.upsert(flow(1, Some(200)));
+        assert!(store.get(1).unwrap().error.is_none());
+        assert!(store.mark_lost_pending().is_empty());
     }
 }
