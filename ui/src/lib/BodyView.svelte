@@ -102,9 +102,9 @@
     padding: 1px 8px;
   }
   .modes button.on {
-    background: var(--accent);
+    background: var(--accent-low);
     border-color: var(--accent);
-    color: #fff;
+    color: var(--accent);
   }
   .meta {
     margin-left: auto;
