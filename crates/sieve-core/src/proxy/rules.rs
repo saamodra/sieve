@@ -21,7 +21,7 @@ use tracing::warn;
 
 use super::{
     BoxError, Conn, ProxyBody,
-    capture::{CaptureBody, Exchange, Side},
+    capture::{CaptureBody, Exchange, Side, header_pairs},
     decode::decode_all,
     strip_hop_by_hop, text_response, upstream_failed,
 };
@@ -214,18 +214,6 @@ async fn hold(engine: &RuleEngine, exchange: &Exchange, parts: &Parts, body: Hel
         .await
 }
 
-fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
-    headers
-        .iter()
-        .map(|(n, v)| {
-            (
-                n.to_string(),
-                String::from_utf8_lossy(v.as_bytes()).into_owned(),
-            )
-        })
-        .collect()
-}
-
 /// Applies what the user entered in the UI. Anything invalid is ignored so a
 /// typo cannot wedge the request.
 fn apply_edit(parts: &mut Parts, body: &mut Bytes, edit: RequestEdit) {
@@ -346,6 +334,17 @@ pub(super) async fn synthetic(
     if !plan.delay.is_zero() {
         tokio::time::sleep(plan.delay).await;
     }
+    synthetic_response(status, headers, body, exchange, client_version)
+}
+
+/// Sends `body` as a response sieve made itself, and records it on the flow.
+fn synthetic_response(
+    status: StatusCode,
+    mut headers: HeaderMap,
+    body: Bytes,
+    exchange: Arc<Exchange>,
+    client_version: Version,
+) -> Response<ProxyBody> {
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
     exchange.set_response(status.as_u16(), Version::HTTP_11, &headers);
     let mut res =
@@ -684,14 +683,7 @@ fn apply_flow_response(fres: &flow::Response, parts: &mut response::Parts, bytes
 
 fn headers_from_pairs(pairs: &[(String, String)]) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    for (name, value) in pairs {
-        if let (Ok(name), Ok(value)) = (
-            HeaderName::from_bytes(name.trim().as_bytes()),
-            HeaderValue::from_str(value),
-        ) {
-            headers.append(name, value);
-        }
-    }
+    append_headers(&mut headers, pairs);
     headers
 }
 
@@ -701,17 +693,15 @@ fn script_response(
     exchange: Arc<Exchange>,
     client_version: Version,
 ) -> Response<ProxyBody> {
-    let mut headers = headers_from_pairs(&fres.headers);
+    let headers = headers_from_pairs(&fres.headers);
     let status = StatusCode::from_u16(fres.status).unwrap_or(StatusCode::OK);
-    let body = fres.body.raw.clone();
-    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
-    exchange.set_response(status.as_u16(), Version::HTTP_11, &headers);
-    let mut res =
-        Response::new(CaptureBody::new(Full::new(body), Side::Response, exchange).boxed_unsync());
-    *res.status_mut() = status;
-    *res.headers_mut() = headers;
-    *res.version_mut() = client_version;
-    res
+    synthetic_response(
+        status,
+        headers,
+        fres.body.raw.clone(),
+        exchange,
+        client_version,
+    )
 }
 
 #[cfg(test)]
