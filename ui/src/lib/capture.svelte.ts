@@ -158,11 +158,13 @@ export class Capture {
     this.#scheduled = false;
     const events = this.#incoming;
     this.#incoming = [];
-    let newClient = false;
+    let clientsChanged = false;
     for (const ev of events) {
       if (ev.type === 'clear') {
         this.rows = [];
         this.#index.clear();
+        this.#clientSet.clear();
+        clientsChanged = true;
         continue;
       }
       if (ev.type !== 'flow') continue;
@@ -176,14 +178,19 @@ export class Capture {
       }
       if (row.client && !this.#clientSet.has(row.client)) {
         this.#clientSet.add(row.client);
-        newClient = true;
+        clientsChanged = true;
       }
     }
     if (this.rows.length > MAX_ROWS) {
       this.rows = this.rows.slice(EVICT_BATCH);
       this.#index = new Map(this.rows.map((r, i) => [r.id, i]));
+      // Evicted rows may have been the only ones from a client.
+      const remaining = new Set<string>();
+      for (const r of this.rows) if (r.client) remaining.add(r.client);
+      if (remaining.size !== this.#clientSet.size) clientsChanged = true;
+      this.#clientSet = remaining;
     }
-    if (newClient) this.clients = [...this.#clientSet].sort();
+    if (clientsChanged) this.clients = [...this.#clientSet].sort();
     this.version++;
   }
 
