@@ -122,6 +122,47 @@ describe('Capture while paused', () => {
   });
 });
 
+describe('Capture sources', () => {
+  const from = (id: number, client: string) => ({ ...flow(id), client }) as FlowSummary;
+
+  it('empties the source list when flows are cleared', async () => {
+    const c = await started([from(1, '10.0.0.1'), from(2, '10.0.0.2')]);
+    expect(c.clients).toEqual(['10.0.0.1', '10.0.0.2']);
+
+    await c.clear();
+    flushFrames();
+
+    expect(c.clients).toEqual([]);
+  });
+
+  it('lists only clients seen after a clear', async () => {
+    const c = await started([from(1, '10.0.0.1'), from(2, '10.0.0.2')]);
+    await c.clear();
+    FakeWebSocket.last.emit({ type: 'flow', flow: from(3, '10.0.0.3') });
+    flushFrames();
+
+    expect(c.clients).toEqual(['10.0.0.3']);
+  });
+
+  it('drops clients that are gone after a reload snapshot', async () => {
+    const c = await started([from(1, '10.0.0.1')]);
+    api.fetchAllFlows.mockResolvedValue([from(2, '10.0.0.2')]);
+    FakeWebSocket.last.emit({ type: 'resync' });
+    await settle();
+    flushFrames();
+
+    expect(c.clients).toEqual(['10.0.0.2']);
+  });
+
+  it('drops clients whose rows were all evicted', async () => {
+    const old = Array.from({ length: 2_000 }, (_, i) => from(i + 1, '10.0.0.1'));
+    const recent = Array.from({ length: 8_001 }, (_, i) => from(i + 2_001, '10.0.0.2'));
+    const c = await started([...old, ...recent]);
+
+    expect(c.clients).toEqual(['10.0.0.2']);
+  });
+});
+
 describe('Capture row cap', () => {
   it('evicts the oldest rows beyond the server-side store size', async () => {
     const c = await started(Array.from({ length: 10_001 }, (_, i) => flow(i + 1)));
