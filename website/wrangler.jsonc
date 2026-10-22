@@ -1,0 +1,13 @@
+{
+	"name": "sieve",
+	"compatibility_date": "2026-10-01",
+	"assets": {
+		"directory": "./dist"
+	},
+	"routes": [
+		{
+			"pattern": "sieve.bysm.dev",
+			"custom_domain": true
+		}
+	]
+}
