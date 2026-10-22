@@ -1,0 +1,8 @@
+---
+import Default from '@astrojs/starlight/components/PageTitle.astro';
+
+// The landing page has its own h1 (the hero headline), so skip the generated page title there.
+const isLanding = Astro.locals.starlightRoute.entry.data.template === 'splash';
+---
+
+{isLanding ? null : <Default {...Astro.props}><slot /></Default>}

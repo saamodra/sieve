@@ -1,0 +1,547 @@
+---
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { Image } from 'astro:assets';
+import shot from '../assets/sieve-ui.png';
+
+const frontmatter = {
+	title: 'sieve',
+	description:
+		'An HTTP/HTTPS debug proxy for Android and iOS, written in Rust. See every request from an emulator, Simulator, or phone in a live web UI.',
+	template: 'splash' as const,
+	editUrl: false as const,
+	pagefind: false,
+	tableOfContents: false as const,
+};
+
+const devices = [
+	{ name: 'Android, no root', cmd: 'sieve android setup' },
+	{ name: 'Android emulator or rooted', cmd: 'sieve android inject-ca' },
+	{ name: 'Android app that ignores the proxy', cmd: 'sieve android vpn' },
+	{ name: 'iOS Simulator (macOS)', cmd: 'sieve ios-sim setup' },
+	{ name: 'iPhone on the same Wi-Fi', cmd: 'sieve ios-device setup' },
+];
+---
+
+<StarlightPage frontmatter={frontmatter}>
+	<div class="landing">
+		<section class="hero" aria-labelledby="_top">
+			<h1 id="_top">See every request your app makes.</h1>
+			<p class="lead">
+				sieve is a debug proxy for Android and iOS, written in Rust. It runs on your Mac, decrypts
+				HTTPS with its own root CA, and lists every request in a live web UI. You can inspect a debug
+				app on an emulator, Simulator, or phone without changing its code.
+			</p>
+			<div class="actions">
+				<a class="btn primary" href="/start/installation/">Read the install guide</a>
+				<a class="btn secondary" href="https://github.com/saamodra/sieve">View the source on GitHub</a>
+			</div>
+			<div class="run">
+				<span class="run-label">After installing, run</span>
+				<div class="cmd">
+					<code>sieve start</code>
+					<button type="button" class="copy" data-copy="sieve start" aria-label="Copy command: sieve start">
+						Copy
+					</button>
+				</div>
+				<span class="run-note">Then open <code>http://localhost:8731</code></span>
+			</div>
+			<p class="sr-only" role="status" aria-live="polite" id="copy-status"></p>
+			<p class="status">
+				Pre-alpha. Features are covered by automated tests, but device setup has not yet been verified
+				end to end on real hardware.
+			</p>
+		</section>
+
+		<figure class="shot">
+			<a href={shot.src} target="_blank" rel="noopener">
+				<Image
+					src={shot}
+					widths={[640, 960, 1280, 1918]}
+					sizes="(min-width: 76rem) 70rem, 100vw"
+					alt="The sieve web UI. A table of requests with method, host, path, status, size, and duration on the left. On the right, a JSON response from httpbin.org is open as an expandable tree."
+					loading="eager"
+				/>
+			</a>
+			<figcaption>The web UI: live requests on the left, one JSON response open on the right. Select the image to open it full size.</figcaption>
+		</figure>
+
+		<section class="devices" aria-labelledby="devices-title">
+			<div class="devices-intro">
+				<h2 id="devices-title">One command per device</h2>
+				<p>
+					Setup is automated where the platform allows it. Each command routes the device through sieve, and
+					restores the device's settings when the session ends.
+				</p>
+				<a class="more" href="/devices/overview/">Device setup guide</a>
+			</div>
+			<ul class="device-list">
+				{
+					devices.map((d) => (
+						<li>
+							<span class="device-name">{d.name}</span>
+							<code>{d.cmd}</code>
+						</li>
+					))
+				}
+			</ul>
+		</section>
+
+		<section class="traffic" aria-labelledby="traffic-title">
+			<h2 id="traffic-title" class="sr-only">What you can do with the traffic</h2>
+			<div class="traffic-main">
+				<h3>Read it</h3>
+				<p>
+					HTTP/1.1, HTTP/2, and WebSocket traffic shows up in a live table that you can filter. gzip, br, and
+					zstd bodies are decoded for display, and JSON opens as an expandable tree.
+				</p>
+				<ul>
+					<li>Copy any request as a curl command</li>
+					<li>Export the session as HAR</li>
+					<li>Tunnel hosts you don't want to see with <code>--passthrough</code></li>
+				</ul>
+			</div>
+			<div class="traffic-side">
+				<div>
+					<h3>Change it</h3>
+					<p>
+						Rules rewrite headers, body, or status, mock a response, map a remote host, add a delay, or
+						block a request. Breakpoints pause a request so you can edit it in the UI. Rhai scripts handle the
+						cases rules can't.
+					</p>
+					<a class="more" href="/guides/rules-and-scripts/">Rules and scripts</a>
+				</div>
+				<div>
+					<h3>Get past pinning</h3>
+					<p>
+						On Android, <code>sieve android frida</code> spawns your app with a certificate-pinning bypass
+						attached. For apps you own or are authorized to test.
+					</p>
+					<a class="more" href="/guides/certificate-pinning/">Certificate pinning</a>
+				</div>
+			</div>
+		</section>
+
+		<section class="audience" aria-labelledby="audience-title">
+			<h2 id="audience-title">Who it helps</h2>
+			<div class="audience-list">
+				<div>
+					<h3>Mobile developers</h3>
+					<p>See what a debug build sends and receives, on an emulator, a Simulator, or a phone on your desk.</p>
+				</div>
+				<div>
+					<h3>Backend developers</h3>
+					<p>
+						Check what the client really sends. Map a host or mock a response to try an API change before it
+						ships.
+					</p>
+				</div>
+				<div>
+					<h3>QA</h3>
+					<p>Reproduce an error by forcing a status, body, or delay, then export the session as HAR for the bug report.</p>
+				</div>
+			</div>
+		</section>
+
+		<section class="cleanup" aria-labelledby="cleanup-title">
+			<h2 id="cleanup-title">It puts things back</h2>
+			<p>
+				sieve saves your proxy settings before it changes them and restores them when the session ends,
+				including on Ctrl+C. If a session crashes, one command restores them.
+			</p>
+			<div class="cmd">
+				<code>sieve doctor --restore</code>
+				<button
+					type="button"
+					class="copy"
+					data-copy="sieve doctor --restore"
+					aria-label="Copy command: sieve doctor --restore"
+				>
+					Copy
+				</button>
+			</div>
+			<p class="fine">
+				Use sieve only on apps and devices you own or are authorized to test. Anyone with the CA private key
+				can read the HTTPS traffic of devices that trust it.{' '}
+				<a href="/reference/responsible-use/">Responsible use</a>
+			</p>
+		</section>
+
+		<section class="closing" aria-labelledby="closing-title">
+			<h2 id="closing-title">Install sieve</h2>
+			<p>Download a prebuilt binary, or build it from source with Rust and Node.js.</p>
+			<div class="actions">
+				<a class="btn primary" href="/start/installation/">Read the install guide</a>
+				<a class="btn secondary" href="https://github.com/saamodra/sieve/releases">Download from Releases</a>
+			</div>
+		</section>
+
+		<footer class="site-foot">
+			<nav aria-label="Site">
+				<a href="/start/quick-start/">Quick start</a>
+				<a href="/reference/cli/">CLI reference</a>
+				<a href="/guides/troubleshooting/">Troubleshooting</a>
+				<a href="https://github.com/saamodra/sieve">GitHub</a>
+				<a href="https://github.com/saamodra/sieve/releases">Releases</a>
+			</nav>
+		</footer>
+	</div>
+</StarlightPage>
+
+<script>
+	const status = document.getElementById('copy-status');
+	document.querySelectorAll<HTMLButtonElement>('button.copy').forEach((button) => {
+		button.addEventListener('click', async () => {
+			const text = button.dataset.copy ?? '';
+			try {
+				await navigator.clipboard.writeText(text);
+				button.textContent = 'Copied';
+				if (status) status.textContent = `Copied: ${text}`;
+			} catch {
+				button.textContent = 'Press Ctrl+C';
+				const code = button.previousElementSibling;
+				if (code) window.getSelection()?.selectAllChildren(code);
+				if (status) status.textContent = 'Copy failed. The command is selected, press Ctrl+C.';
+			}
+			setTimeout(() => {
+				button.textContent = 'Copy';
+			}, 1800);
+		});
+	});
+</script>
+
+<style is:global>
+	/* Let the landing page use its own width instead of the docs column. */
+	.sl-container:has(.landing) {
+		max-width: none;
+	}
+	/* The empty panel that normally holds the page title. */
+	.content-panel:has(~ .content-panel .landing) {
+		display: none;
+	}
+	.content-panel:has(.landing) {
+		padding-inline: 0;
+		padding-block: 0;
+	}
+	.content-panel:has(.landing) > .sl-container {
+		margin-inline: 0;
+	}
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+	}
+
+	.landing {
+		--gutter: clamp(1rem, 4vw, 2rem);
+		--wide: 72rem;
+		color: var(--sl-color-text);
+		line-height: 1.6;
+	}
+	.landing > * {
+		width: min(100% - 2 * var(--gutter), var(--wide));
+		margin-inline: auto;
+	}
+	/* Starlight adds top margins between siblings; this page spaces with grid gaps instead. */
+	.landing :where(section, div, p, ul, li, figure) {
+		margin-block: 0;
+	}
+	.landing h1,
+	.landing h2,
+	.landing h3 {
+		color: var(--sl-color-white);
+		font-weight: 600;
+		line-height: 1.2;
+		margin: 0;
+	}
+	.landing h1 {
+		font-size: clamp(2.1rem, 5.2vw, 3.5rem);
+		letter-spacing: -0.015em;
+		max-width: 16ch;
+	}
+	.landing h2 {
+		font-size: clamp(1.45rem, 3vw, 1.95rem);
+		letter-spacing: -0.01em;
+	}
+	.landing h3 {
+		font-size: 1.15rem;
+	}
+	.landing p {
+		margin: 0;
+	}
+	.landing a:not(.btn) {
+		color: var(--sl-color-text-accent);
+		text-underline-offset: 0.2em;
+	}
+	.landing a:not(.btn):hover {
+		color: var(--sl-color-white);
+	}
+	.landing code {
+		font-family: var(--sl-font-system-mono);
+		font-size: 0.92em;
+		background: var(--sv-panel);
+		border: 1px solid var(--sv-line);
+		border-radius: 3px;
+		padding: 0.08em 0.35em;
+		overflow-wrap: anywhere;
+	}
+
+	.landing a.more {
+		display: inline-flex;
+		align-items: center;
+		min-height: 2.75rem;
+	}
+
+	/* Hero */
+	.landing .hero {
+		padding-block: clamp(2.5rem, 7vw, 5.5rem) clamp(1.75rem, 4vw, 2.5rem);
+		display: grid;
+		gap: 1.5rem;
+		justify-items: start;
+	}
+	.landing .lead {
+		font-size: clamp(1.05rem, 1.8vw, 1.2rem);
+		max-width: 44rem;
+		color: var(--sl-color-gray-2);
+	}
+	.landing .actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.75rem;
+	}
+	.landing .btn {
+		display: inline-flex;
+		align-items: center;
+		min-height: 2.75rem;
+		padding: 0.5rem 1.1rem;
+		border-radius: 4px;
+		font-weight: 600;
+		text-decoration: none;
+		border: 1px solid var(--sl-color-accent);
+	}
+	.landing .btn.primary {
+		background: var(--sl-color-accent);
+		color: var(--sl-color-text-invert);
+	}
+	.landing .btn.primary:hover {
+		background: var(--sl-color-white);
+		border-color: var(--sl-color-white);
+	}
+	.landing .btn.secondary {
+		color: var(--sl-color-white);
+		border-color: var(--sl-color-gray-3);
+	}
+	.landing .btn.secondary:hover {
+		border-color: var(--sl-color-white);
+	}
+	.landing .run {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.5rem 0.9rem;
+		color: var(--sv-dim);
+		font-size: 0.95rem;
+	}
+	.landing .cmd {
+		display: inline-flex;
+		align-items: stretch;
+		border: 1px solid var(--sl-color-gray-4);
+		border-radius: 4px;
+		background: var(--sv-panel);
+		max-width: 100%;
+	}
+	.landing .cmd code {
+		border: 0;
+		background: transparent;
+		padding: 0.5rem 0.85rem;
+		font-size: 0.95rem;
+		color: var(--sl-color-white);
+		display: flex;
+		align-items: center;
+	}
+	.landing .copy {
+		font: inherit;
+		font-size: 0.85rem;
+		font-weight: 500;
+		min-width: 5.5rem;
+		min-height: 2.75rem;
+		padding: 0 0.85rem;
+		color: var(--sl-color-text-accent);
+		background: transparent;
+		border: 0;
+		border-left: 1px solid var(--sl-color-gray-4);
+		cursor: pointer;
+	}
+	.landing .copy:hover {
+		color: var(--sl-color-white);
+	}
+	.landing .status {
+		max-width: 44rem;
+		color: var(--sv-dim);
+		font-size: 0.92rem;
+	}
+
+	/* Screenshot */
+	.landing .shot {
+		margin-block: 0 clamp(3.5rem, 8vw, 6rem);
+	}
+	.landing .shot a {
+		display: block;
+		border: 1px solid var(--sv-line);
+		border-radius: 6px;
+		overflow: hidden;
+		line-height: 0;
+	}
+	.landing .shot img {
+		display: block;
+		width: 100%;
+		height: auto;
+	}
+	.landing .shot figcaption {
+		margin-top: 0.6rem;
+		color: var(--sv-dim);
+		font-size: 0.9rem;
+	}
+
+	/* Devices */
+	.landing .devices {
+		display: grid;
+		gap: 1.75rem 3rem;
+		margin-block-end: clamp(3.5rem, 8vw, 6.5rem);
+	}
+	.landing .devices-intro {
+		display: grid;
+		gap: 0.9rem;
+		align-content: start;
+	}
+	.landing .device-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		border-top: 1px solid var(--sv-line);
+	}
+	.landing .device-list li {
+		display: grid;
+		gap: 0.35rem 1.5rem;
+		padding-block: 0.9rem;
+		border-bottom: 1px solid var(--sv-line);
+		margin: 0;
+	}
+	.landing .device-name {
+		color: var(--sl-color-gray-1);
+	}
+	@media (min-width: 56rem) {
+		.landing .devices {
+			grid-template-columns: minmax(0, 1fr) minmax(0, 1.8fr);
+		}
+		.landing .device-list li {
+			grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+			align-items: baseline;
+		}
+	}
+
+	/* Traffic */
+	.landing .traffic {
+		display: grid;
+		gap: 2.5rem 4rem;
+		margin-block-end: clamp(3rem, 7vw, 5rem);
+	}
+	.landing .traffic-main {
+		display: grid;
+		gap: 1rem;
+		align-content: start;
+	}
+	.landing .traffic-main h3 {
+		font-size: clamp(1.6rem, 3.4vw, 2.2rem);
+		letter-spacing: -0.01em;
+	}
+	.landing .traffic-main p {
+		font-size: 1.08rem;
+		max-width: 38rem;
+	}
+	.landing .traffic-main ul {
+		margin: 0.25rem 0 0;
+		padding-left: 1.1rem;
+		display: grid;
+		gap: 0.4rem;
+	}
+	.landing .traffic-side {
+		display: grid;
+		gap: 2rem;
+		align-content: start;
+	}
+	.landing .traffic-side > div {
+		display: grid;
+		gap: 0.6rem;
+		padding-top: 1.1rem;
+		border-top: 1px solid var(--sv-line);
+		justify-items: start;
+	}
+	@media (min-width: 56rem) {
+		.landing .traffic {
+			grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+		}
+	}
+
+	/* Audience */
+	.landing .audience {
+		display: grid;
+		gap: 1.5rem;
+		padding-block: 2rem 0;
+		border-top: 1px solid var(--sv-line);
+		margin-block-end: clamp(3rem, 7vw, 5rem);
+	}
+	.landing .audience-list {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+		gap: 1.75rem 2.5rem;
+	}
+	.landing .audience-list > div {
+		display: grid;
+		gap: 0.4rem;
+		align-content: start;
+	}
+
+	/* Cleanup */
+	.landing .cleanup {
+		display: grid;
+		gap: 1.1rem;
+		justify-items: start;
+		max-width: 40rem;
+		margin-inline: max(var(--gutter), calc((100% - var(--wide)) / 2));
+		margin-block-end: clamp(3.5rem, 8vw, 6rem);
+		width: min(100% - 2 * var(--gutter), 40rem);
+	}
+	.landing .cleanup .fine {
+		color: var(--sv-dim);
+		font-size: 0.95rem;
+	}
+
+	/* Closing */
+	.landing .closing {
+		display: grid;
+		gap: 1rem;
+		justify-items: start;
+		padding-block: 2.5rem 3rem;
+		border-top: 1px solid var(--sv-line);
+	}
+
+	/* Footer */
+	.landing .site-foot {
+		padding-block: 1.25rem 3rem;
+		border-top: 1px solid var(--sv-line);
+	}
+	.landing .site-foot nav {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem 1.5rem;
+	}
+	.landing .site-foot a {
+		display: inline-flex;
+		align-items: center;
+		min-height: 2.75rem;
+	}
+</style>

@@ -9,6 +9,7 @@ HTTP/HTTPS debug proxy for Android and iOS, written in Rust. The full plan, with
 - `crates/sieve-ui`: axum API, WebSocket feed, embedded frontend.
 - `crates/sieve`: the `sieve` CLI. `app.rs` wires the proxy and UI into one session; `cmd/` has one file per subcommand.
 - `ui/`: Svelte + Vite frontend. `scripts/android/`: device-side shell scripts.
+- `website/`: Astro Starlight docs site, deployed to https://sieve.bysm.dev. Run `npm ci && npm run build` inside it; it is independent of the Rust build.
 
 ## Contracts between crates
 
