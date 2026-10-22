@@ -5,28 +5,30 @@
   --line: #2c313a;
   --fg: #d7dce4;
   --fg-dim: #8a93a3;
-  --accent: #4ea1ff;
-  --sel: #1f3a5c;
+  --accent: #5fc47a;
+  --accent-low: #12281a;
+  --sel: #1f2f27;
   --ok: #5fc47a;
   --warn: #e0b341;
   --bad: #ef6b6b;
   --info: #7fa7ff;
-  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   color-scheme: dark;
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #ffffff;
-    --bg-2: #f4f5f7;
-    --bg-3: #e9ebef;
-    --line: #d8dce3;
+    --bg: #f6f7f9;
+    --bg-2: #eceef2;
+    --bg-3: #e0e3e9;
+    --line: #cfd4dc;
     --fg: #1d2129;
-    --fg-dim: #667085;
-    --accent: #0a6cde;
-    --sel: #d6e7fb;
+    --fg-dim: #5b6475;
+    --accent: #16722f;
+    --accent-low: #d9f0e0;
+    --sel: #dcefe2;
     --ok: #1a8a3c;
-    --warn: #a06a00;
+    --warn: #8a5c00;
     --bad: #c62828;
     --info: #3b5bdb;
     color-scheme: light;
@@ -47,7 +49,7 @@ body,
 body {
   background: var(--bg);
   color: var(--fg);
-  font: 12px/1.4 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font: 12px/1.4 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
   overflow: hidden;
 }
 
@@ -76,9 +78,9 @@ button:disabled {
 }
 
 button.active {
-  background: var(--accent);
+  background: var(--accent-low);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--accent);
 }
 
 input,
@@ -99,7 +101,7 @@ select {
 }
 
 .s-2xx {
-  color: var(--ok);
+  color: var(--fg);
 }
 .s-3xx {
   color: var(--info);

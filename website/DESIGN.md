@@ -21,7 +21,7 @@ Core colors, taken from sieve's own web UI so the site and the product look like
 | Text     | `#d7dce4` | `#1d2129` |
 | Dim text | `#8a93a3` | `#5b6475` |
 
-One accent: green (`#5fc47a` dark, `#16722f` light). Reason: green is what the web UI shows for a successful response, so it means "request came through". The accent is used for the logo, links, the primary button, and the focus ring. Nothing else.
+One accent: green (`#5fc47a` dark, `#16722f` light). Reason: green is the brand color of the sieve mark, and the web UI uses it the same way. The UI shows 2xx statuses in neutral text, because nearly every row is 2xx and a sieve lets normal traffic through; only non-2xx statuses should stand out. The accent is used for the logo, links, the primary button, and the focus ring. Nothing else.
 
 ## Type
 
