@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { Capture } from './lib/capture.svelte';
   import FlowTable from './lib/FlowTable.svelte';
+  import Logo from './lib/Logo.svelte';
   import DetailPanel from './lib/DetailPanel.svelte';
   import RulesPanel from './lib/RulesPanel.svelte';
   import BreakpointsPanel from './lib/BreakpointsPanel.svelte';
@@ -86,7 +87,10 @@
 
 <div class="app">
   <header>
-    <span class="brand">sieve</span>
+    <span class="brand" class:off={!capture.connected} title={capture.connected ? undefined : 'Disconnected'}>
+      <Logo size={16} />
+      <span class="wordmark">sieve</span>
+    </span>
     <input
       class="text"
       type="search"
@@ -123,7 +127,7 @@
 
   <main>
     <section class="table">
-      <FlowTable {rows} {selectedId} onselect={(id) => (selectedId = id)} />
+      <FlowTable {rows} {total} {selectedId} onselect={(id) => (selectedId = id)} />
     </section>
     {#if selectedId !== null}
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -157,10 +161,19 @@
     border-bottom: 1px solid var(--line);
   }
   .brand {
-    font-weight: 700;
-    letter-spacing: 0.02em;
-    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 6px;
     margin-right: 4px;
+    color: var(--accent);
+    transition: opacity 0.2s;
+  }
+  .brand.off {
+    opacity: 0.4;
+  }
+  .wordmark {
+    font-weight: 600;
+    color: var(--fg);
   }
   .text {
     width: 340px;

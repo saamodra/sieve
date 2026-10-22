@@ -1,13 +1,16 @@
 <script lang="ts">
   import { formatDuration, formatSize, formatTime, statusClass } from './format';
   import type { Row } from './capture.svelte';
+  import Logo from './Logo.svelte';
 
   interface Props {
     rows: Row[];
+    // Rows before filtering; tells an empty capture from a filter that hides everything.
+    total?: number;
     selectedId: number | null;
     onselect: (id: number) => void;
   }
-  let { rows, selectedId, onselect }: Props = $props();
+  let { rows, total = rows.length, selectedId, onselect }: Props = $props();
 
   const ROW_H = 22;
   const OVERSCAN = 12;
@@ -65,7 +68,20 @@
     <span class="r">Status</span><span class="r">Size</span><span class="r">Duration</span>
   </div>
   {#if rows.length === 0}
-    <div class="empty">Waiting for traffic…</div>
+    <div class="empty">
+      <div class="msg">
+        <Logo size={48} />
+        {#if total > 0}
+          <p class="title">No requests match the filter</p>
+        {:else}
+          <p class="title">Waiting for traffic…</p>
+          <p class="hint">
+            Route a device here with <span class="mono">sieve android setup</span> or
+            <span class="mono">sieve ios-sim setup</span>
+          </p>
+        {/if}
+      </div>
+    </div>
   {/if}
   <div class="body" style:height="{rows.length * ROW_H}px">
     <div class="window" style:transform="translateY({start * ROW_H}px)">
@@ -155,5 +171,27 @@
     place-items: center;
     color: var(--fg-dim);
     pointer-events: none;
+  }
+  .msg {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    text-align: center;
+  }
+  .msg :global(svg) {
+    color: var(--line);
+    opacity: 0.8;
+    margin-bottom: 8px;
+  }
+  .msg p {
+    margin: 0;
+  }
+  .title {
+    font-size: 14px;
+  }
+  .hint {
+    font-size: 12px;
+    opacity: 0.8;
   }
 </style>
