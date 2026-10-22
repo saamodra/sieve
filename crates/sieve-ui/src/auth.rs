@@ -26,12 +26,15 @@ fn percent_decode(s: &str) -> String {
     while i < b.len() {
         match b[i] {
             b'+' => out.push(b' '),
-            b'%' if b.len() >= i + 3 => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                Ok(v) => {
-                    out.push(v);
+            b'%' => match (
+                b.get(i + 1).and_then(|c| (*c as char).to_digit(16)),
+                b.get(i + 2).and_then(|c| (*c as char).to_digit(16)),
+            ) {
+                (Some(hi), Some(lo)) => {
+                    out.push((hi * 16 + lo) as u8);
                     i += 2;
                 }
-                Err(_) => out.push(b'%'),
+                _ => out.push(b'%'),
             },
             c => out.push(c),
         }
@@ -161,4 +164,30 @@ pub async fn require_local(State(port): State<u16>, req: Request, next: Next) ->
         }
     }
     next.run(req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::percent_decode;
+
+    #[test]
+    fn keeps_invalid_sequences_literally() {
+        assert_eq!(percent_decode("%a€"), "%a€");
+        assert_eq!(percent_decode("%€"), "%€");
+        assert_eq!(percent_decode("%"), "%");
+        assert_eq!(percent_decode("%4"), "%4");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn decodes_plus_and_hex() {
+        assert_eq!(percent_decode("a%20b+c"), "a b c");
+        assert_eq!(percent_decode("%41%4a"), "AJ");
+    }
+
+    #[test]
+    fn decodes_multibyte_token() {
+        assert_eq!(percent_decode("t%C3%B6k%E2%82%ACn"), "tök€n");
+        assert_eq!(percent_decode("tök€n"), "tök€n");
+    }
 }
