@@ -1,0 +1,93 @@
+/* Palette and type follow DESIGN.md. Dark is the default theme. */
+
+:root {
+	--sl-font: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--sl-font-system-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+	--sv-line: #2c313a;
+	--sv-panel: #1b1e24;
+	--sv-dim: #8a93a3;
+
+	--sl-color-black: #14161a;
+	--sl-color-gray-6: #1b1e24;
+	--sl-color-gray-5: #2c313a;
+	--sl-color-gray-4: #5f6878;
+	--sl-color-gray-3: #8a93a3;
+	--sl-color-gray-2: #b4bcc9;
+	--sl-color-gray-1: #d7dce4;
+	--sl-color-white: #f1f3f6;
+
+	--sl-color-accent-low: #12281a;
+	--sl-color-accent: #5fc47a;
+	--sl-color-accent-high: #5fc47a;
+
+	--sl-color-bg: #14161a;
+	--sl-color-bg-nav: #14161a;
+	--sl-color-bg-sidebar: #14161a;
+	--sl-color-hairline-light: #2c313a;
+	--sl-color-hairline: #2c313a;
+	--sl-color-hairline-shade: #1b1e24;
+	--sl-color-text: #d7dce4;
+	--sl-color-text-accent: #5fc47a;
+}
+
+:root[data-theme='light'] {
+	--sv-line: #cfd4dc;
+	--sv-panel: #eceef2;
+	--sv-dim: #5b6475;
+
+	--sl-color-white: #14161a;
+	--sl-color-gray-1: #1d2129;
+	--sl-color-gray-2: #333a47;
+	--sl-color-gray-3: #5b6475;
+	--sl-color-gray-4: #6b7585;
+	--sl-color-gray-5: #cfd4dc;
+	--sl-color-gray-6: #eceef2;
+	--sl-color-gray-7: #f6f7f9;
+	--sl-color-black: #ffffff;
+
+	--sl-color-accent-low: #d9f0e0;
+	--sl-color-accent: #16722f;
+	--sl-color-accent-high: #16722f;
+
+	--sl-color-bg: #f6f7f9;
+	--sl-color-bg-nav: #f6f7f9;
+	--sl-color-bg-sidebar: #f6f7f9;
+	--sl-color-hairline-light: #cfd4dc;
+	--sl-color-hairline: #cfd4dc;
+	--sl-color-hairline-shade: #e3e6eb;
+	--sl-color-text: #1d2129;
+	--sl-color-text-accent: #16722f;
+}
+
+/* Starlight text-invert is the label color on the accent button. */
+:root {
+	--sl-color-text-invert: #14161a;
+}
+:root[data-theme='light'] {
+	--sl-color-text-invert: #ffffff;
+}
+
+:focus-visible {
+	outline: 2px solid var(--sl-color-accent);
+	outline-offset: 2px;
+}
+
+code,
+kbd,
+pre {
+	font-family: var(--sl-font-system-mono);
+}
+
+/* Inline code inside headings stays proportional to the heading text. */
+.sl-markdown-content :is(h2, h3, h4) code {
+	font-size: 0.8em;
+	padding: 0.05em 0.3em;
+}
+
+/* Keep flag names on one line in the CLI tables on wide screens. */
+@media (min-width: 50rem) {
+	.sl-markdown-content td:first-child code {
+		white-space: nowrap;
+	}
+}
